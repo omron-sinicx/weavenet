@@ -1,35 +1,88 @@
-# 📦 py-tiny-pkg
-[![test](https://github.com/denkiwakame/py-tiny-pkg/actions/workflows/test.yml/badge.svg)](https://github.com/denkiwakame/py-tiny-pkg/actions/workflows/test.yml)
-[![publish](https://github.com/denkiwakame/py-tiny-pkg/actions/workflows/pub.yml/badge.svg)](https://github.com/denkiwakame/py-tiny-pkg/actions/workflows/pub.yml)
-[![PyPI version](https://badge.fury.io/py/tinypkg.svg)](https://badge.fury.io/py/tinypkg)
-
-- a tiny packaging example that only has a [pyproject.toml](https://pip.pypa.io/en/stable/reference/build-system/pyproject-toml/) w/[setuptools 🔨](https://github.com/pypa/setuptools)
-- 🎉 setuptools [v61.0.0](https://github.com/pypa/setuptools/releases/tag/v61.0.0) is released with experimental support for `pyproject.toml`
-  - 📄 official documentation https://setuptools.pypa.io/en/latest/userguide/pyproject_config.html
-  - 💬 discussions https://discuss.python.org/t/help-testing-experimental-features-in-setuptools/
-
+# weavenet components
+- an official re-implementation of WeaveNet and its components.
+- related papers
+  - [Stable Matching with WeaveNet](https://openreview.net/forum?id=ktHKpsbsxx)
+  - [Point Cloud Matching with (sparse) WeaveNet](https://arxiv.org/abs/2202.02149)
+  
 ### 🦾 motivation
-- we can find lots of packaging examples with `poetry`, `pdm`, etc., but hard to find examples with the standard `setuptools` based on the latest PEP supports.
+- A trainable neural solver for general assignment tasks, including bipartite matching, linear assignment with stochastic noise, and stable matching (a.k.a. stable marriage problem).
 
-### ✔️ confirmed versions
-- `Ubuntu 20.04` `Mac OS X 11.6.4`
-- `python 3.7.*, 3.8.*, 3.9.*`
-- `pip 22.0.4+`
+### Requirements
+- This package requires python3.7+, pytorch, and torch-scatter.
 
-### ⬇️ install locally
-- clone this repo
-- `$ pip install .` or `$ pip install .[dev]` (for testing)
-- `$ pip show -f tinypkg`
+### install from GitHub.com (not available now since this repo is still private.)
+- `pip install git+https://github.com/omron-sinicx/weavenet`
+
+### a minimum sample code
+
+#### Case1: Apply WeaveNet to matching based on extracted features
+
+```python:case1.py
+from weavenet.model import TrainableMatchingModule, WeaveNetHead
+
+matching_module = TrainableMatchingModule(
+    head = WeaveNetHead(
+        input_channels=512, # channels of input vertex features
+        output_channels_list=[32, 32, 32, 32, 32, 32] # output channels of each layers
+        mid_channels_list=[64, 64, 64, 64, 64, 64] # intermediate channels of each layers
+        calc_residual=[False] * 6 # do not connect residual path
+        keep_first_var_after = 0 # keep the first layer output as the source of first residual path.      
+   )
+  output_channels = 1 # output only 1 matching matrix.
+  pre_interactor = CrossConcatVertexFeatures(),
+)
+
+
+z_src = some_feature_extractor.forward(x_src) # z_src.shape = [B, N, C]
+z_tar = some_feature_extractor.forward(x_tar)# z_src.shape = [B, M, C]
+matching = matching_module.forward(x_src, x_tar) # matching.shape = [B, 1, N, M]
 
 ```
-Name: tinypkg
-Version: 0.0.5.dev0+g1b7cb5d.d20220925
-Summary: a tiny package example w/setuptools
-Home-page: github.com/denkiwakame/py-tiny-pkg
-Author: denkiwakame
-Author-email:
+
+#### Case2: Apply WeaveNet to solve stable matching.
+```python:case2.py
+from weavenet.model import TrainableMatchingModule, WeaveNetHead
+
+matching_module = TrainableMatchingModule(
+    head = WeaveNetHead(
+        input_channels=2, # channels of input problem instance.
+        output_channels_list=[32, 32, 32, 32, 32, 32] # output channels of each layers
+        mid_channels_list=[64, 64, 64, 64, 64, 64] # intermediate channels of each layers
+        calc_residual=[False] * 6 # do not connect residual path
+        keep_first_var_after = 0 # keep the first layer output as the source of first residual path.      
+   )
+  output_channels = 1 # output only 1 matching matrix.
+)
+
+# sab stands for satisfaction_a2b, and sba_t stands for satisfaction_b2a_transposed
+sab, sba_t = batch # sab.shape = [B, N, M, 1], sba_t.shape = [B, N, M, 1]. 
+
+matching = matching_module.forward(sab, sba_t) # matching.shape = [B, 1, N, M]
+
+```
+
+### Features from original implementation
+- Optimized for jit execution.
+- Better interface for light use.
+- New class interface design for easy customization of the matching network.
+
+
+### ⬇️ install locally
+```
+ git clone git@github.com:omron-sinicx/weavenet.git weavenet
+ cd weavenet
+`$ pip install .` or `$ pip install .[dev]` (for testing)
+`$ pip show -f weavenet
+```
+
+```
+Name: weavenet
+Version: 1.0.0
+Summary: an official re-implementation of WeaveNet and its components.
+Home-page: github.com/omron-sinicx/weavenet
+Author: Atsushi Hashimoto
 License: MIT License
-        Copyright (c) 2022 denkiwakame
+        Copyright (c) 2022 OMRON SINIC X Corp.
         Permission is hereby granted, free of charge, to any person obtaining a copy
         of this software and associated documentation files (the "Software"), to deal
         in the Software without restriction, including without limitation the rights
@@ -45,107 +98,20 @@ License: MIT License
         LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
         OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
         SOFTWARE.
-Location: /home/mai/Garage/py-tiny-pkg/.venv/lib/python3.10/site-packages
-Requires: requests
-Required-by:
-Files:
-  tinypkg-0.0.5.dev0+g1b7cb5d.d20220925.dist-info/INSTALLER
-  tinypkg-0.0.5.dev0+g1b7cb5d.d20220925.dist-info/LICENSE.txt
-  tinypkg-0.0.5.dev0+g1b7cb5d.d20220925.dist-info/METADATA
-  tinypkg-0.0.5.dev0+g1b7cb5d.d20220925.dist-info/RECORD
-  tinypkg-0.0.5.dev0+g1b7cb5d.d20220925.dist-info/REQUESTED
-  tinypkg-0.0.5.dev0+g1b7cb5d.d20220925.dist-info/WHEEL
-  tinypkg-0.0.5.dev0+g1b7cb5d.d20220925.dist-info/direct_url.json
-  tinypkg-0.0.5.dev0+g1b7cb5d.d20220925.dist-info/top_level.txt
-  tinypkg/__init__.py
-  tinypkg/__pycache__/__init__.cpython-310.pyc
-  tinypkg/__pycache__/_version.cpython-310.pyc
-  tinypkg/__pycache__/hi.cpython-310.pyc
-  tinypkg/_version.py
-  tinypkg/hi.py
+
 ```
 
 ### 👩‍🔧 testing
 - `$ pip install .[dev]`
 - `$ python -m pytest --cov`
 
-### :octocat: install from GitHub.com
-- `pip install git+https://github.com/denkiwakame/py-tiny-pkg`
 
-### 📝 editable install (-e)
-- 🎉 setuptools [v64.0.0+](https://github.com/pypa/setuptools/releases/tag/v64.0.0) supports editable installation!
-  - https://setuptools.pypa.io/en/latest/userguide/development_mode.html
-  - 📑 PEP660 https://peps.python.org/pep-0660/
-  - :octocat: https://github.com/pypa/setuptools/pull/3488
-  - pip 21.1+ supports `build_editable` hook https://pip.pypa.io/en/stable/reference/build-system/pyproject-toml/#editable-installation
-
-### ❓ src-layout vs. flat-layout
-- see https://setuptools.pypa.io/en/stable/userguide/package_discovery.html
-
-### ❓ How can I manage ext_modules ?
-- `pyproject.toml` does not strictly intend to replace `setup.py` .
-- If you need to build C/C++ extension modules w/[pybind11](https://github.com/pybind/pybind11) or something, write the following `setup.py` (dynamic config) alongside with the `pyproject.toml` (metadata file).
-
-```python
-import subprocess
-import os
-import sys
-
-from setuptools import Extension, setup
-from setuptools.command.build_ext import build_ext
-
-class CMakeExtension(Extension):
-    def __init__(self, name, sourcedir=""):
-        Extension.__init__(self, name, sources=[])
-        self.sourcedir = os.path.abspath(sourcedir)
-
-class CMakeBuild(build_ext):
-    def build_extension(self, ext):
-        cfg = "Debug" if self.debug else "Release"  # TODO
-        extdir = os.path.abspath(os.path.dirname(
-            self.get_ext_fullpath(ext.name)))
-        cmake_args = [
-            f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}",
-            f"-DPYTHON_EXECUTABLE={sys.executable}",
-            f"-DCMAKE_BUILD_TYPE={cfg}",
-        ]
-        build_args = []
-        if not os.path.exists(self.build_temp):
-            os.makedirs(self.build_temp)
-        subprocess.check_call(
-            ["cmake", ext.sourcedir] + cmake_args, cwd=self.build_temp
-        )
-        subprocess.check_call(
-            ["cmake", "--build", "."] + build_args, cwd=self.build_temp
-        )
-setup(
-    ext_modules=[CMakeExtension("bindings")],
-    cmdclass={"build_ext": CMakeBuild},
-)
+### 📚 Citation
 ```
-
-
-### 📦 publish to PyPI
-- use [pypa/build](https://github.com/pypa/build), a simple PEP 517 frontend and [pypa/gh-action-pypi-publish](https://github.com/pypa/gh-action-pypi-publish)
-  - https://packaging.python.org/en/latest/guides/publishing-package-distribution-releases-using-github-actions-ci-cd-workflows/
-
-### 📚 Refernces
-#### pyproject.toml
-- https://pip.pypa.io/en/stable/reference/build-system/pyproject-toml/
-
-#### build-system
-- 📑 PEP 517 https://www.python.org/dev/peps/pep-0517/
-  - setuptools support https://setuptools.pypa.io/en/latest/build_meta.html
-- 📑 PEP 518 https://www.python.org/dev/peps/pep-0518/
-
-#### metadata
-- 📑 PEP 621 https://peps.python.org/pep-0621/
-  - setuptools support (wip) https://github.com/pypa/setuptools/issues/1688
-  - experimental release https://discuss.python.org/t/help-testing-experimental-features-in-setuptools/13821
-
-#### linter support for pyproject.toml
-- black (supported)
-- isort (supported)
-- mypy (supported) https://github.com/python/mypy/issues/5205
-- flake8 https://github.com/PyCQA/flake8/issues/234
-  - pyproject-flake8 https://github.com/csachs/pyproject-flake8
+@article{yanagi2022edge,
+  title={Edge-Selective Feature Weaving for Point Cloud Matching},
+  author={Yanagi, Rintaro and Hashimoto, Atsushi and Sone, Shusaku and Chiba, Naoya and Ma, Jiaxin and Ushiku, Yoshitaka},
+  journal={arXiv preprint arXiv:2202.02149},
+  year={2022}
+}
+```

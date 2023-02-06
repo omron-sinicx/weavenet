@@ -23,17 +23,17 @@ where = ["src"]
 namespaces = true
 
 [tool.setuptools_scm]
-write_to = "src/tinypkg/_version.py"
+write_to = "src/weavenet/_version.py"
 
 # PEP 621 https://peps.python.org/pep-0621/
 [project]
-name = "tinypkg"
-# version = "0.0.1"
+name = "weavenet"
+version = "1.0.0"
 # for automated versioning by pypa/setuptools_scm. see https://peps.python.org/pep-0621/#dynamic
-dynamic = ["version"]
-description = "a tiny package example w/setuptools"
-authors = [{ name = "denkiwakame" }, { email = "denkivvakame@gmail.com" }]
-maintainers = [{ name = "denkiwakame" }, { email = "denkivvakame@gmail.com" }]
+#dynamic = ["version"]
+description = "a package to use WeaveNet with pytorch"
+authors = [{ name = "AtsushiHashimoto" }, { email = "ahashimoto1009@gmail.com" }]
+maintainers = [{ name = "AtsushiHashimoto" }, { email = "ahashimoto1009@gmail.com" }]
 readme = "README.md"
 license = { file = "LICENSE.txt" }
 requires-python = ">=3.7"
@@ -46,10 +46,10 @@ dependencies = ["requests"]
 [project.optional-dependencies]
 dev = ["pytest==5.0.0", "pytest-cov[all]", "mypy==0.910", "black==21.10b0"]
 [project.urls]
-Homepage = "https://github.com/denkiwakame/py-tiny-pkg"
-documentation = "https://github.com/denkiwakame/py-tiny-pkg"
-repository = "https://github.com/denkiwakame/py-tiny-pkg"
-changelog = "https://github.com/denkiwakame/py-tiny-pkg/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/omron-sinicx/weavenet"
+documentation = "https://omron-sinicx.github.com/weavenet/"
+repository = "https://github.com/omron-sinicx/weavenet"
+changelog = "https://github.com/omron-sinicx/weavenet/blob/main/CHANGELOG.md"
 
 [tool.black]
 target-version = ['py39']
