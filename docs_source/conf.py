@@ -58,13 +58,13 @@ exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 html_theme = 'renku'
 #html_theme = 'python_docs_theme'
 
-html_static_path = ['static']
+html_static_path = ['_static']
 
 
 # a better implementation with version: https://gist.github.com/nlgranger/55ff2e7ff10c280731348a16d569cb73
 
 
-linkcode_revision = "v1.0.0"
+linkcode_revision = "v1.0.1"
 try:
     # lock to commit number
     cmd = "git log -n1 --pretty=%H"
@@ -75,7 +75,7 @@ try:
     cmd = "git log --first-parent {} -n1 --pretty=%H".format(linkcode_revision)
     master = subprocess.check_output(cmd.split()).strip().decode('utf-8')
     if head == master:
-        linkcode_revision = "v1.0.0"
+        linkcode_revision = "v1.0.1"
 
     # if we have a tag, use tag as reference
     cmd = "git describe --exact-match --tags " + head
