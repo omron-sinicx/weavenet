@@ -20,6 +20,12 @@ import sys, os
 sys.path.append(os.path.abspath('../src/'))
 
 extensions = ['sphinx.ext.autodoc', 'sphinx.ext.napoleon','sphinx_multiversion','sphinx.ext.linkcode']
+smv_tag_whitelist = r'^v\d+\.\d+\.\d+$'            # Include tags like "v2.1.023"
+smv_branch_whitelist = r'^.*$'
+smv_remote_whitelist = None                   # Only use local branches
+smv_released_pattern = r'^tags/.*$'
+smv_outputdir_format = '{ref.name}'
+
 
 # Automatically extract typehints when specified and place them in
 # descriptions of the relevant function/method.

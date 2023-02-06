@@ -290,7 +290,7 @@ class MatchingModuleHead(nn.Module):
                     normalizer, # deep-copied normalizer 
                     unit.activator, # shallow copy
                 )
-                for unit, normalizer in zip(module_units, module_normalizers2)
+                for unit, normalizer in zip(units, module_normalizers2)
             ]
             self.stream0 = nn.ModuleList(units)
             self.stream1 = nn.ModuleList(units) # shallow copy
@@ -348,7 +348,7 @@ class MatchingModuleHead(nn.Module):
         Returns:
            A pair of processed features, but in the single stream mode, they are the same tensor.
         """
-        x_keep = None
+        xab_keep = xab
         for l, unit in enumerate(self.stream):
             calc_res = self.calc_residual[l]
             if l%2==0:
@@ -358,12 +358,12 @@ class MatchingModuleHead(nn.Module):
             xab = unit(xab, dim_target=dim)
             
             if self.use_residual:              
-                if i==self.keep_first_var_after:
+                if l==self.keep_first_var_after:
                     # keep values after the directed unit's process.
                     xab_keep = xab
                 if calc_res:
                     xab_keep, xab = xab, xab + xab_keep            
-        return xab, xab
+        return xab, xab # return xab as two-stream output.
     
 
 

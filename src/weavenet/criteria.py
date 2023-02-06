@@ -75,7 +75,7 @@ class CriteriaStableMatching():
                 m = m.squeeze(-1).unsqueeze(1)
                 loss, log = _criterion_sm(m, sab, sba_t, one2one_weight, stability_weight)
                 if m.size(1)==1:
-                    return loss, log, m[:,0]
+                    return loss, log
                 
                 return loss, log
             return criterion_no_fairness                
