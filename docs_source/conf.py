@@ -19,7 +19,7 @@ import sys, os
 
 sys.path.append(os.path.abspath('../src/'))
 
-extensions = ['sphinx.ext.autodoc', 'sphinx.ext.napoleon','sphinx_multiversion','sphinx.ext.linkcode']
+extensions = ['sphinx.ext.autodoc', 'sphinx.ext.napoleon','sphinx_multiversion','sphinx.ext.linkcode','sphinx.ext.githubpages']
 smv_tag_whitelist = r'^v\d+\.\d+\.\d+$'            # Include tags like "v2.1.023"
 smv_branch_whitelist = r'^.*$'
 smv_remote_whitelist = None                   # Only use local branches
