@@ -58,7 +58,7 @@ exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 html_theme = 'renku'
 #html_theme = 'python_docs_theme'
 
-html_static_path = ['_static']
+html_static_path = ['static']
 
 
 # a better implementation with version: https://gist.github.com/nlgranger/55ff2e7ff10c280731348a16d569cb73
