@@ -7,7 +7,7 @@
 Losses
 ==================================================
 
-.. automodule:: models.components.loss
+.. automodule:: weavenet.loss
    :members:
 
   

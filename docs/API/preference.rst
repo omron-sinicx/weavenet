@@ -6,7 +6,7 @@
 
 Preferences
 ==================================================
-.. automodule:: models.components.preference
+.. automodule:: weavenet.preference
    :exclude-members: PreferenceFormat
    :members: 
    

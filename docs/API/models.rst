@@ -6,15 +6,15 @@
 
 Models
 ==================================================
-.. automodule:: models.components.model
+.. automodule:: weavenet.model
    :members: TrainableMatchingModule, WeaveNetHead
    
 Experimental
 --------------------------------
-.. automodule:: models.components.model
+.. automodule:: weavenet.model
    :members: ExperimentalHead, ExperimentalUnitListGenerator
    
 Private Models
 --------------------------------
-.. automodule:: models.components.model
+.. automodule:: weavenet.model
    :members: Unit, UnitListGenerator, WeaveNetUnitListGenerator, MatchingModuleHead

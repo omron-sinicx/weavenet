@@ -7,19 +7,19 @@
 Sparse Layers
 ================ 
   
-.. automodule:: models.components.sparse.layers   
+.. automodule:: weavenet.sparse.layers   
    :members: 
    
-.. automodule:: models.components.sparse.layers   
+.. automodule:: weavenet.sparse.layers   
    :members: SparseDenseAdaptor, LinearMaskInferenceOr, MaxPoolingAggregatorSp, SetEncoderBaseSp, SetEncoderPointNetSp, DualSoftmaxSp, DualSoftmaxSqrtSp, 
    
 Experimental
 --------
-.. automodule:: models.components.sparse.layers
+.. automodule:: weavenet.sparse.layers
    :members: DualSoftmaxFuzzyLogicAndSp
 
 Private Layers
 --------
-.. automodule:: models.components.sparse.layers
+.. automodule:: weavenet.sparse.layers
    :members: IndexSelectFormatter
    

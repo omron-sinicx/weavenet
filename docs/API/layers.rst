@@ -7,16 +7,16 @@
 Layers
 ==================================================
 
-.. automodule:: models.components.layers   
+.. automodule:: weavenet.layers   
    :members: SetEncoderPointNet, CrossConcat, CrossConcatVertexFeatures, MaxPoolingAggregator, DualSoftmax, DualSoftmaxSqrt, BatchNormXXC
    
 Experimental
 ------------------------
-.. automodule:: models.components.layers   
+.. automodule:: weavenet.layers   
    :members: SetEncoderPointNetCrossDirectional, SetEncoderPointNetTotalDirectional, CrossDifferenceConcat, DualSoftmaxFuzzyLogicAnd
 
 Private Layers
 ------------------------
-.. automodule:: models.components.layers   
+.. automodule:: weavenet.layers   
    :members: Interactor, SetEncoderBase
    

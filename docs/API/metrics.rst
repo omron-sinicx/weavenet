@@ -6,6 +6,6 @@
 Metrics
 ==================================================
 
-.. automodule:: models.components.metric
+.. automodule:: weavenet.metric
    :members: 
    
