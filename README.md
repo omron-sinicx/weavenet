@@ -77,7 +77,7 @@ matching = matching_module.forward(sab, sba_t) # matching.shape = [B, 1, N, M]
 
 ```
 Name: weavenet
-Version: 1.0.0
+Version: 1.0.1
 Summary: an official re-implementation of WeaveNet and its components.
 Home-page: github.com/omron-sinicx/weavenet
 Author: Atsushi Hashimoto
