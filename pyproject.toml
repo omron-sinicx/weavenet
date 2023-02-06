@@ -28,7 +28,7 @@ write_to = "src/weavenet/_version.py"
 # PEP 621 https://peps.python.org/pep-0621/
 [project]
 name = "weavenet"
-version = "1.0.0"
+version = "v1.0.0"
 # for automated versioning by pypa/setuptools_scm. see https://peps.python.org/pep-0621/#dynamic
 #dynamic = ["version"]
 description = "a package to use WeaveNet with pytorch"

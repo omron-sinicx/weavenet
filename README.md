@@ -10,7 +10,7 @@
 ### Requirements
 - This package requires python3.7+, pytorch, and torch-scatter.
 
-### install from GitHub.com (not available now since this repo is still private.)
+### install from GitHub.com
 - `pip install git+https://github.com/omron-sinicx/weavenet`
 
 ### a minimum sample code
@@ -100,10 +100,6 @@ License: MIT License
         SOFTWARE.
 
 ```
-
-### 👩‍🔧 testing
-- `$ pip install .[dev]`
-- `$ python -m pytest --cov`
 
 
 ### 📚 Citation

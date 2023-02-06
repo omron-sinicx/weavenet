@@ -3,23 +3,23 @@
 # For the full list of built-in configuration values, see the documentation:
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 import inspect
-import pkg_resources
+import subprocess
 
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = 'WeaveNet'
-copyright = '2023, Atsushi Hashimoto'
+copyright = '2023, OMRON SINIC X Corp.'
 author = 'Atsushi Hashimoto'
-release = '0.1.1'
+release = '1.0.0'
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
 import sys, os
 
-sys.path.append(os.path.abspath('../src'))
+sys.path.append(os.path.abspath('../src/'))
 
-extensions = ['sphinx.ext.autodoc', 'sphinx.ext.napoleon','sphinx_multiversion','autodocsumm','sphinx.ext.linkcode','enum_tools.autoenum']
+extensions = ['sphinx.ext.autodoc', 'sphinx.ext.napoleon','sphinx_multiversion','sphinx.ext.linkcode']
 
 # Automatically extract typehints when specified and place them in
 # descriptions of the relevant function/method.
@@ -56,13 +56,34 @@ html_static_path = ['_static']
 
 
 # a better implementation with version: https://gist.github.com/nlgranger/55ff2e7ff10c280731348a16d569cb73
-linkcode_url = "https://github.com/omron-sinicx/weavenet/tree/main/{filepath}#L{linestart}-L{linestop}"
-# Current git reference. Uses branch/tag name if found, otherwise uses commit hash
 
-#linkcode_url = "https://github.com/omron-sinicx/weavenet-egal/blob/" \
-#               + linkcode_revision + "/{filepath}#L{linestart}-L{linestop}"
+
+linkcode_revision = "v1.0.0"
+try:
+    # lock to commit number
+    cmd = "git log -n1 --pretty=%H"
+    head = subprocess.check_output(cmd.split()).strip().decode('utf-8')
+    linkcode_revision = head
+
+    # if we are on master's HEAD, use master as reference
+    cmd = "git log --first-parent {} -n1 --pretty=%H".format(linkcode_revision)
+    master = subprocess.check_output(cmd.split()).strip().decode('utf-8')
+    if head == master:
+        linkcode_revision = "v1.0.0"
+
+    # if we have a tag, use tag as reference
+    cmd = "git describe --exact-match --tags " + head
+    tag = subprocess.check_output(cmd.split(" ")).strip().decode('utf-8')
+    linkcode_revision = tag
+
+except subprocess.CalledProcessError:
+    pass
+
+linkcode_url = "https://github.com/omron-sinicx/weavenet/tree/" \
+               + linkcode_revision + "/{filepath}#L{linestart}-L{linestop}"
 
 def linkcode_resolve(domain, info):
+    
     if domain != 'py' or not info['module']:
         return None
 
@@ -80,25 +101,23 @@ def linkcode_resolve(domain, info):
             obj = getattr(obj, part)
         except Exception:
             return None
-
     '''
     try:
         modpath = pkg_resources.require(topmodulename)[0].location
         filepath = os.path.relpath(inspect.getsourcefile(obj), modpath)
         if filepath is None:
-            return
+            return None
     except Exception:
         return None
-    '''
+     '''
     filepath = os.path.relpath(inspect.getsourcefile(obj), './')
-    print(filepath)
+
     try:
         source, lineno = inspect.getsourcelines(obj)
     except OSError:
         return None
     else:
         linestart, linestop = lineno, lineno + len(source) - 1
-
+        
     return linkcode_url.format(
         filepath=filepath, linestart=linestart, linestop=linestop)
-
