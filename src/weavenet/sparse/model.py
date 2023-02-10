@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-from ..model import TrainableMatchingModule, MatchingModuleHead, Unit, UnitListGenerator, ExclusiveElementsOfUnit, UnitProcOrder
+from ..model import TrainableMatchingModule, MatchingModule, Unit, UnitListGenerator, ExclusiveElementsOfUnit, UnitProcOrder
 from .layers import *
 from ..layers import CrossConcat
 from typing import List, Tuple, Optional
@@ -10,20 +10,20 @@ class TrainableMatchingModuleSp(TrainableMatchingModule):
     r""" A variant of :class:`TrainableMatchingModule <weavenet.weavenet.TrainableMatchingModule>` that treats sparse bipartite graph.
 
     Args:
-        head: a sparse GNN head that estimate matching.
-        mask_estimator: an algorithm to estimate mask from input of :func:`forward` or from the output of **pre_head**.
+        net: a sparse GNN net that estimate matching.
+        mask_estimator: an algorithm to estimate mask from input of :func:`forward` or from the output of **pre_net**.
         output_channels: see :class:`TrainableMatchingModule <weavenet.weavenet.TrainableMatchingModule>`.
         pre_interactor: :class:`TrainableMatchingModule <weavenet.weavenet.TrainableMatchingModule>`.
-        pre_head: a GNN pre_head applied before **mask_estimator**.
+        pre_net: a GNN pre_net applied before **mask_estimator**.
         stream_aggregator: the aggregator that merges estimation from all the streams (Default: :class:`DualSoftMaxSp <weavenet.sparse.layers.DualSoftmaxSqrtSp>`)            
         
     **Example of Usage (1) Use WeaveNet to solve stable matching or any other combinatorial optimization**::
     
-        from weavenet import TrainableMatchingModule, WeaveNetHead
+        from weavenet import TrainableMatchingModule, WeaveNet
         
         weave_net_sp = TrainableMatchingModule(
-            head = WeaveNetHeadSp(2*32, [64]*3, [32]*3),
-            pre_head = WeaveNetHead(2, [64]*3,  [32]*3),
+            net = WeaveNetSp(2*32, [64]*3, [32]*3),
+            pre_net = WeaveNet(2, [64]*3,  [32]*3),
         )
 
         for xab, xba_t in batches:
@@ -34,13 +34,13 @@ class TrainableMatchingModuleSp(TrainableMatchingModule):
 
     **Example of Usage (2) Use WeaveNet for matching extracted features **::
     
-        from sparse.weavenet import TrainableMatchingModuleSp, WeaveNetHeadSp
-        from weavenet import WeaveNetHead
+        from sparse.weavenet import TrainableMatchingModuleSp, WeaveNetSp
+        from weavenet import WeaveNet
         from layers import CrossConcatVertexFeatures
         
         weave_net_sp = TrainableMatchingModule(
-            head = WeaveNetHeadSp(2*32, [64]*3, [32]*3),
-            pre_head = WeaveNetHead(2*vfeature_channels+2, [64]*3,  [32]*3),
+            net = WeaveNetSp(2*32, [64]*3, [32]*3),
+            pre_net = WeaveNet(2*vfeature_channels+2, [64]*3,  [32]*3),
             pre_interactor = CrossConcatVertexFeatures(compute_similarity_cosine, softmax)
         )
 
@@ -53,18 +53,41 @@ class TrainableMatchingModuleSp(TrainableMatchingModule):
 
     """
     def __init__(self,
-                 head: nn.Module, # typically MatchingModuleSparseHead
+                 net_sparse: nn.Module, # typically MatchingModuleSparse
+                 pre_interactor_sparse: Optional[CrossConcat] = CrossConcat(),
                  mask_estimator:nn.Module=LinearMaskInferenceOr(tau=10.0, drop_rate=0.3),
                  output_channels:int=1,
-                 pre_interactor:Optional[CrossConcat] = CrossConcat(),
-                 pre_head: Optional[nn.Module]=None, # typically MatchingModuleHead
+                 net_dense: Optional[nn.Module]=None, # typically MatchingModule
+                 pre_interactor_dense:Optional[CrossConcat] = None, # typically CrossConcat
                  stream_aggregator:Optional[StreamAggregatorSp] = DualSoftmaxSqrtSp()):
-        super().__init__(head, output_channels, pre_interactor, stream_aggregator)
-        self.pre_head = pre_head
+        super().__init__(net_dense, output_channels, pre_interactor_dense, stream_aggregator)
+        self.net_sparse = self.net_sparse
+        self.pre_interactor_sparse = self.pre_interactor_sparse
+        
         self.mask_estimator = mask_estimator            
         if hasattr(self.mask_estimator, "build"):
-            self.mask_estimator.build(pre_head.output_channels, output_channels)
+            self.mask_estimator.build(pre_net.output_channels, output_channels)
         
+    def _forward_sp(self, xab:torch.Tensor, xba_t:torch.Tensor, 
+                    src_vertex_id:torch.Tensor, tar_vertex_id:torch.Tensor)->Tuple[torch.Tensor, torch.Tensor]:
+        
+        # first interaction
+        if self.pre_interactor is not None:
+            xab, xba_t = self.pre_interactor_sparse(xab, xba_t)
+            
+        # net
+        xab, xba_t = self.net_sparse.forward(xab, xba_t,src_vertex_id, tar_verted_id)
+        return xab, xba_t
+        
+    def _forward_wrapup(self, xab:torch.Tensor, xba_t:torch.Tensor, 
+               src_vertex_id:torch.Tensor, tar_vertex_id:torch.Tensor)->Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # wrap up into logits
+        xab_fut = torch.jit.fork(self.last_layer(xab))
+        xba_t = self.last_layer(xba_t)
+        
+        # aggregate two streams while applying logistic regression.
+        return self.stream_aggregator(torch.jit.wait(xab_fut), src_vertex_id, tar_vertex_id, xba=xba_t)
+
     def forward(self, xab:torch.Tensor, xba_t:torch.Tensor)->Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         r""" Try to match a bipartite agents on side `a` and `b`.
                 
@@ -80,51 +103,48 @@ class TrainableMatchingModuleSp(TrainableMatchingModule):
            
         Returns:
            A resultant tensor aggregated by stream_aggregator after processed through the network.
-        """        
+        """      
+        if self.net is not None:
+            super()._forward(xab, xba_t)
         
-        # first interaction
-        if self.pre_interactor is not None:
-            xab, xba_t = self.pre_interactor(xab, xba_t)
-            
-        # head1
-        if self.pre_head is not None:
-            xab, xba_t = self.pre_head.forward(xab, xba_t)
-            
+        
         # edge pruning
         mask = self.mask_estimator(xab, xba_t)
-        # share grad. of positive edges with all the selected edges (fail-safe selection strategy).
-        mask[mask==1.0] == mask[mask==1.0].mean() 
+
         sd_adaptor = SparseDenseAdaptor(mask)
         xab = sd_adaptor.to_sparse(xab*mask)
         xba_t = sd_adaptor.to_sparse(xba_t*mask)
         
-        # head
-        if self.head is not None:
-            xab, xba_t = self.head.forward(
-                xab, 
-                xba_t, 
-                sd_adaptor.src_vertex_id,
-                sd_adaptor.tar_vertex_id,
-            )
+        
+        xab, xba_t = self._forward_sp(
+            xab, 
+            xba_t, 
+            sd_adaptor.src_vertex_id,
+            sd_adaptor.tar_vertex_id,
+        )
+        
+        m, mab, mba_t = self._forward_wrapup(xab, xba_t, sd_adaptor.src_vertex_id, sd_adaptor.tar_vertex_id)
+        m_fut = torch.jit.fork(sd_adaptor.to_dense, m)
+        mab_fut = torch.jit.fork(sd_adaptor.to_dense, mab)
+        mba_t_fut =  torch.jit.fork(sd_adaptor.to_dense, mba_t)
+        
+        if self.train:            
+            m = torch.jit.wait(m_fut)
+            m[m==0] = mask[m==0] # backward path for negative edges. Not average for negative samples to deny clearly negative edges individually.
+            mab = torch.jit.wait(mab_fut)
+            mab[mab==0] = mask[mab==0]
+            mba_t = torch.jit.wait(mba_t_fut)
+            mba_t[mba_t==0] = mask[mba_t==0]
+        else:
+            m = torch.jit.wait(m_fut)
+            mab = torch.jit.wait(mab_fut)
+            mba_t = torch.jit.wait(mba_t_fut)
 
-        # wrap up into logits
-        xab = self.last_layer(xab)
-        xba_t = self.last_layer(xba_t)
-        
-        # aggregate two streams while applying logistic regression.
-        m, mab, mba_t = self.stream_aggregator(xab, sd_adaptor.src_vertex_id, sd_adaptor.tar_vertex_id, xba=xba_t)
-        m = sd_adaptor.to_dense(m)
-        m[m==0] = mask[m==0] # backward path for negative edges. Not average for negative samples to deny clearly negative edges individually.
-        mab = sd_adaptor.to_dense(mab)
-        mab[mab==0] = mask[mab==0]
-        mba_t = sd_adaptor.to_dense(mba_t)
-        mba_t[mba_t==0] = mask[mba_t==0]
-        
         return m, mab, mba_t
 
 
-class MatchingModuleHeadSp(MatchingModuleHead):
-    r""" A head of matching module. This controlls the way of interaction at each end of unit-process and residual paths. See :class:`MatchingModuleHead <weavenet.weavenet.MatchingModuleHead>` for initialization.
+class MatchingModuleSp(MatchingModule):
+    r""" A net of matching module. This controlls the way of interaction at each end of unit-process and residual paths. See :class:`MatchingModule <weavenet.weavenet.MatchingModule>` for initialization.
     
      """                
     def forward(self,
@@ -329,17 +349,17 @@ class ExperimentalUnitListGeneratorSp(UnitListGenerator):
             for in_ch, mid_ch, out_ch in zip(in_channels_list, self.mid_channels_list, self.out_channels_list)
         ]    
         
-class WeaveNetHeadSp(MatchingModuleHeadSp):
-    r""" Sparse version of :class:`WeaveNetHead <weavenet.weavenet.WeaveNetHead>`
+class WeaveNetSp(MatchingModuleSp):
+    r""" Sparse version of :class:`WeaveNet <weavenet.weavenet.WeaveNet>`
 
         Args:
             input_channels: input_channels for the first unit (see :class:`WeaveNetUnitListGenerator <weavenet.weavenet.WeaveNetUnitListGenerator>`).
             output_channels_list: output_channels for the units (see :class:`WeaveNetUnitListGenerator <weavenet.weavenet.WeaveNetUnitListGenerator>`). 
             mid_channels_list: mid_channels for each point-net-based set encoders (see :class:`WeaveNetUnitListGenerator <weavenet.weavenet.WeaveNetUnitListGenerator>`).
-            calc_residual: see :class:`MatchingModuleHead <weavenet.weavenet.MatchingModuleHead>`
-            keep_first_var_after: see :class:`MatchingModuleHead <weavenet.weavenet.MatchingModuleHead>`
-            exclusive_elements_of_unit: see :class:`MatchingModuleHead <weavenet.weavenet.MatchingModuleHead>`
-            is_single_stream: see :class:`MatchingModuleHead <weavenet.weavenet.MatchingModuleHead>`
+            calc_residual: see :class:`MatchingModule <weavenet.weavenet.MatchingModule>`
+            keep_first_var_after: see :class:`MatchingModule <weavenet.weavenet.MatchingModule>`
+            exclusive_elements_of_unit: see :class:`MatchingModule <weavenet.weavenet.MatchingModule>`
+            is_single_stream: see :class:`MatchingModule <weavenet.weavenet.MatchingModule>`
 
     """
     def __init__(self,
@@ -364,17 +384,17 @@ class WeaveNetHeadSp(MatchingModuleHeadSp):
             exclusive_elements_of_unit = exclusive_elements_of_unit,
         )        
         
-class ExperimentalHeadSp(MatchingModuleHeadSp):
-    r""" Sparse version of :obj:`ExperimentalHead <weavenet.weavenet.ExperimentalHead>`
+class ExperimentalSp(MatchingModuleSp):
+    r""" Sparse version of :obj:`Experimental <weavenet.weavenet.Experimental>`
 
         Args:
             input_channels: input_channels for the first unit (see :class:`ExperimentalUnitListGenerator <weavenet.weavenet.ExperimentalUnitListGenerator>`).
             output_channels_list: output_channels for the units (see :class:`ExperimentalUnitListGenerator <weavenet.weavenet.ExperimentalUnitListGenerator>`). 
             mid_channels_list: mid_channels for each point-net-based set encoders (see :class:`ExperimentalUnitListGenerator <weavenet.weavenet.ExperimentalUnitListGenerator>`).
-            calc_residual: see :class:`MatchingModuleHead <weavenet.weavenet.MatchingModuleHead>`
-            keep_first_var_after: see :class:`MatchingModuleHead <weavenet.weavenet.MatchingModuleHead>`
-            exclusive_elements_of_unit: see :class:`MatchingModuleHead <weavenet.weavenet.MatchingModuleHead>`
-            is_single_stream: see :class:`MatchingModuleHead <weavenet.weavenet.MatchingModuleHead>`
+            calc_residual: see :class:`MatchingModule <weavenet.weavenet.MatchingModule>`
+            keep_first_var_after: see :class:`MatchingModule <weavenet.weavenet.MatchingModule>`
+            exclusive_elements_of_unit: see :class:`MatchingModule <weavenet.weavenet.MatchingModule>`
+            is_single_stream: see :class:`MatchingModule <weavenet.weavenet.MatchingModule>`
 
     """
     def __init__(self,

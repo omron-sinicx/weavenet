@@ -21,7 +21,18 @@ __all__ = [
     'DualSoftmaxSqrt',
     'DualSoftmaxFuzzyLogicAnd',
     'BatchNormXXC',
+    'compute_cosine_similarity',
 ]
+
+@torch.jit.script
+def compute_cosine_similarity(xa: torch.Tensor, xb:torch.Tensor)->torch.Tensor:
+    r"""
+    Shapes:
+        - xa: :math:`(B, N, C)`
+        - xb: :math: `(B, M, C)`
+        - output: :math: `(B, N, M)`
+    """
+    return torch.einsum("nlc,nsc->nls", xa, xb)
 
 class BatchNormXXC(nn.Module):
     r"""
@@ -387,7 +398,49 @@ class SetEncoderPointNetTotalDirectional(SetEncoderBase):
         return torch.jit.wait(z_edge_fut) + torch.jit.wait(z_src_vertex_fut) + torch.jit.wait(z_tar_vertex_fut) + z_all_vertex
         
 StreamAggregator = Callable[[torch.Tensor,Optional[torch.Tensor], bool],Tuple[torch.Tensor,torch.Tensor,torch.Tensor]]
-class DualSoftmax(nn.Module):
+class StreamAggregatorTHRU(nn.Module):
+    r"""
+    
+    Applies nothing, but just multiply. 
+    
+    .. math::
+        \text{THRU}(x^{ab}_{ij}, x^{ba}_{ij}) = x^{ab}_{ij} * x^{ba}_{ji}
+
+    
+    """
+    def set_xba_t(self, 
+                  xab:torch.Tensor, 
+                  xba_t:Optional[torch.Tensor],
+                     )->Tuple[torch.Tensor]:
+        if xba_t is None:
+            xba_t = xab
+        return xba_t
+        
+        
+    def forward(self, xab:torch.Tensor, 
+                      xba_t:Optional[torch.Tensor],
+                     )->Tuple[torch.Tensor, torch.Tensor]:
+        r""" Calculate the dual softmax for batched matrices.
+                
+        Shape:
+           - xab: :math:`(B, \ldots, N, M, C)`
+           - xba_t: :math:`(B, \ldots, N, M, C)`
+           - output:  :math:`(B, \ldots, N, M, C')`
+           
+        Args:
+           xab: 1st batched matrices.
+           
+           xba_t: 2nd batched matrices.           
+           
+        Returns:
+           xab*xba_t, xab, xba_t
+ 
+           
+        """
+        xba_t = self.set_xba_t(xab, xba_t)
+        return xab*xba_t, xab, xba_t
+    
+class DualSoftmax(StreamAggregatorTHRU):
     r"""
     
     Applies the dual-softmax calculation to a batched matrices. DualSoftMax is originally proposed in `LoFTR (CVPR2021) <https://zju3dv.github.io/loftr/>`_. 
@@ -402,49 +455,43 @@ class DualSoftmax(nn.Module):
         super().__init__()
         self.sm_col = nn.Softmax(dim=dim_tar)
         self.sm_row = nn.Softmax(dim=dim_src)
-        
+         
+    
     def _apply_softmax(self,
                       xab:torch.Tensor, 
-                      xba:Optional[torch.Tensor],
-                      is_xba_transposed:bool,
+                      xba_t:Optional[torch.Tensor],
                      )->Tuple[torch.Tensor, torch.Tensor]:
-        if xba is None:
-            xba_t = xab
-        elif is_xba_transposed:
-            xba_t = xba
-        else:
-            xba_t = xba.transpose(-3,-2)
         zab_fut = torch.jit.fork(self.sm_col, xab)
-        zba = self.sm_row(xba_t)
+        
+        xba_t = self.set_xba_t(xab, xba_t)
+        zba_t = self.sm_row(xba_t)
         zab = torch.jit.wait(zab_fut)
-        return zab, zba
+        return zab, zba_t
     
     
 
     def forward(self, 
                 xab:torch.Tensor, 
-                xba:Optional[torch.Tensor]=None, 
-                is_xba_transposed:bool=True)->Tuple[torch.Tensor,torch.Tensor,torch.Tensor]:
+                xba_t:Optional[torch.Tensor]=None)->Tuple[torch.Tensor,torch.Tensor,torch.Tensor]:
         r""" Calculate the dual softmax for batched matrices.
                 
         Shape:
-           - xab: :math:`(B, \ldots, N_1, M_1, D)`
-           - xba: :math:`(B, \ldots, N_2, M_2, D)`
-           - output:  :math:`(B, \ldots, N_1, M_1, D)`
+           - xab: :math:`(B, \ldots, N, M, C)`
+           - xba_t: :math:`(B, \ldots, N, M, C)`
+           - output:  :math:`(B, \ldots, N, M, 1)`
            
         Args:
            xab: 1st batched matrices.
            
-           xba: 2nd batched matrices. If None, **xab** is used as (transposed) **xba**. This option corresponds to the original implementation of LoFTR's dual softmax.
+           xba_t: 2nd batched matrices. 
            
-           is_ba_transposed: set **False** if :math:`(N_1, M_1)==(N_2, M_2)` and set **True** if :math:`(N_1, M_1)==(M_2, N_2)`. Default: **False**.
            
         Returns:
            a triplet of **(mab * mba_t)**, **mab** (=softmax(xab, dim=-2)), **mba_t** (=softmax(xba_t, dim=-1)
  
            
         """
-        zab, zba_t = self._apply_softmax(xab, xba, is_xba_transposed)
+        zab, zba_t = self._apply_softmax(xab, xba_t)
         return zab * zba_t, zab, zba_t
 
 class DualSoftmaxSqrt(DualSoftmax):

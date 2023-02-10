@@ -5,10 +5,14 @@ from typing import Optional, Callable, Tuple
 from torch_scatter import scatter_max #, scatter_min, scatter_mean
 from torch_scatter.composite import scatter_softmax
 
+from weavenet.layer import compute_cosine_similarity
+
 @torch.jit.ignore
 def _resampling_relaxed_Bernoulli(logits:torch.Tensor, tau:float)->torch.Tensor:
     sampler = torch.distributions.RelaxedBernoulli(tau, logits=logits)  
     return sampler.rsample()
+
+
 
 def _gumbel_sigmoid_logits(logits:torch.Tensor,
                           tau:float=1.,
@@ -72,7 +76,7 @@ class LinearMaskInferenceOr(nn.Module):
     def forward(self,
                 xab: torch.Tensor,
                 xba_t: torch.Tensor,
-               )->torch.Tensor: 
+               )->Tuple[torch.Tensor,torch.Tensor]:        
         r"""
         Shape:
            - xab: :math:`(B, N, M, C)`
@@ -85,7 +89,7 @@ class LinearMaskInferenceOr(nn.Module):
            xba_t: batched feature map with the same shape with xab, and represent edges from side `b` to `a`.
 
         Returns:
-           mask, in which edges with score 1.0 are selected and 0.0 are dropped.
+           - mask, where edges with score 1.0 are selected and 0.0 are dropped.
         """
 
         xab = self.linear.forward(xab)
@@ -95,8 +99,154 @@ class LinearMaskInferenceOr(nn.Module):
         y = xab + xba_t
         y[y==2.0] /= 2
         return y
-    
 
+
+class SimilarityBasedMaskInference(nn:Module):
+    r"""Inferences mask based on similarity.
+
+        Args:
+            compute_similarity: a callable object that calculates a similarity matrix.
+            select_mask: a callable object that select a (differentiable) mask based on the similarity. [Default: :class:`MaskSelectorRadiusNeighbor`(0.0,0.5)].
+    """    
+    def __init__(self,
+                 compute_similarity:Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = compute_cosine_similarity,
+                 select_mask:Callable[[torch.Tensor], torch.Tensor] = MaskSelectorRadiusNeighbor(0.0, 0.5),
+                ):
+        self.compute_similarity = compute_similarity
+        self.select_mask = select_mask
+        
+    def forward(self,
+                xab: torch.Tensor,
+                xba_t: torch.Tensor,
+               )->torch.Tensor:
+        sim = self.compute_similarity(xab, xba_t)
+        return self.select_mask(sim)
+    
+class MaskSelectorBySimilarity(nn.Module):
+    r"""select mask for edge pruning with radius neighbor.
+    
+    Args:
+        radius: the threshold of radius neighbor. If set a value <=0, only the max_edge_survive_rate is considered. This <=0 option may accelerate the process by fixing the network shape [default: 0].
+        max_edge_survive_rate: set maximum number of edges selected in this selector by rate [default: 1.0]. e.g., a 4x4 graph has 16 edges, and at most 7 will path if the rate is 0.5.
+        max_suvive_edges_per_sample: set the maximum number of edges selected in this selector by the number of edges per sample.  If <=0, ignored. If <N (or <M), set N (or M)[default: -1]   
+        
+    """
+    def __init__(self, 
+                 max_edge_survive_rate:float=1.1,
+                 max_survive_edges_per_sample:int = -1):
+        super().__init__()
+        self.max_edge_survive_rate = max_edge_survive_rate
+        self.max_survive_edges_per_sample = max_survive_edges_per_sample
+        self.set_thresh_by_kthvalue = (0<=max_edge_survive_rate and  max_edge_survive_rate<1.0) or max_survive_edges_per_sample>0
+        
+    def get_threshold_by_k(self, torch.Temsor sim, doim:int=-1, k:int=-1)->torch.Tensor:
+        r"""calculate threshold that prevend memory overflow, based on the params.
+
+        Shape:
+            - sim: (\ldots, N, M)
+        Args:
+            sim: a similarity matrix.
+            dim: dimention of kth value.
+        Return:
+            the number of edges survive.
+        """      
+        if not self.set_thresh_by_kthvalue:
+            return torch.tensor()
+        
+        # possibly max k.
+        if k<-1: 
+            k = sim.size(dim)
+        
+        # set k by absolute number of edges per sample
+        if self.max_survive_edges_per_sample > 0:
+            k_ = max(N, M, self.max_suvive_edges_per_sample)
+            k = min(k, k_)
+            
+        # set k by rate.
+        if max_edge_survive_rate < 0.0 or max_edge_survive_rate > 1.0:            
+            k_ = int(sim.size(-1)*self.max_edge_survive_rate)
+            k = min(k, k_)
+            
+        return sim.kthvalue(k, dim=dim, keepdim=True)[0]
+    
+    def wrapup(self, sim:torch.Tensor, sim_selected:torch.Tensor)->torch.Tensor:
+        if self.train:
+            sim = sim - sim.detach() # make the discretized mask differential
+        else:
+            sim.fill_(0)
+        sim[sim_selected] += 1
+        return sim
+
+
+class MaskSelectorRadiusNeighbor(MaskSelectorBySimilarity):
+    r"""select mask for edge pruning with radius neighbor.
+    
+    Args:
+        radius: the threshold of radius neighbor. If set a value <=0, only the max_edge_survive_rate is considered. This <=0 option may accelerate the process by fixing the network shape [default: 0].
+        max_edge_survive_rate: see :class:`MaskSelectorBySimilarity`
+        max_suvive_edges_per_sample: see :class:`MaskSelectorBySimilarity`
+        
+    """
+    def __init__(self, 
+                 radius:float=0.0,
+                 max_edge_survive_rate:float=1.1,
+                 max_survive_edges_per_sample:int = -1):
+        super().__init__(max_edge_survive_rate, max_survive_edges_per_sample)
+        self.radius = radius
+        assert(radius > 0.0 or self.set_thresh_by_kthvalue) 
+                 
+    def forward(torch.Tensor sim)->torch.Tensor:
+        r"""
+
+        Shape:
+            - sim: (\ldots, N, M)
+        Args:
+            sim: a similarity matrix.
+        Return:
+            a differential mask. Elements with mask==1 is selected.
+        """
+        B, N, M = sim.shape
+        sim = sim.view(B, -1)
+        
+        thresh = self.get_threshold_by_k(sim, dim=-1) 
+        if thresh.dim()==0:
+            thresh = torch.tensor([self.radius], dtype=sim.dtype, device=sim.device)            
+        else:
+            thresh = thresh.min(self.radius)
+            
+        return self.wrapup(sim, sim<thresh).view(B, N, M)
+
+class MaskSelectorReciprocalNeighbor(MaskSelectorBySimilarity):
+    r"""Select mask for edge pruning with :math:`k`-reciprocal neighbors. Aｎ element :math:`x_a` (on side `a`) is k-reciprocal neighbor of  :math:`x_b` (on side `b`) when :math:`x_a` is in top-:math:`k` neighbors of :math:`x_b` and vice .
+    
+    Args:
+        k: use k-th nearest vertices as neighbors. If <=0, ignored [default: 0] 
+        max_edge_survive_rate: see :class:`MaskSelectorBySimilarity`
+        max_suvive_edges_per_sample: see :class:`MaskSelectorBySimilarity`
+    """
+    def __init__(self, 
+                 k:int=0,
+                 max_edge_survive_rate:float=0.5,
+                 max_suvive_edges_per_sample:int = -1):
+        super().__init__(max_edge_survive_rate, max_survive_edges_per_sample)
+        self.k = k
+        assert(k > 0 or self.set_thresh_by_kthvalue) 
+       
+    def forward(torch.Tensor sim)->torch.Tensor:
+        r"""
+
+        Shape:
+            - sim: (\ldots, N, M)
+        Args:
+            sim: a similarity matrix.
+        Return:
+            a differential mask. Elements with mask==1 is selected.
+        """
+        thresh2_fut = torch.jit.fork(self.get_threshold_by_k, sim, dim=-1, self.k)
+        thresh = self.get_threshold_by_k(sim, dim=-2, self.k)
+        thresh = thresh.min(torch.jit.wait(thresh2_fut))        
+        return self.wrapup(sim, sim<thresh)
+    
 class SparseDenseAdaptor():
     r"""Adapt sparse-dense matrix conversion, based on a given **mask**.
     
@@ -365,7 +515,7 @@ class DualSoftmaxFuzzyLogicAndSp(DualSoftmaxSp):
 if __name__ == "__main__":
     #_ = WeaveNetOldImplementation(2, 2,1)
     _ = WeaveNet(
-            WeaveNetHead6(1,), 2, #input_channel:int,
+            WeaveNetStream(1,), 2, #input_channel:int,
                  [4,8,16], #out_channels:List[int],
                  [2,4,8], #mid_channels:List[int],1,2,2)
                  calc_residual=[False, False, True],
