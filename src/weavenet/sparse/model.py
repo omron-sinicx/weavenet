@@ -107,20 +107,19 @@ class TrainableMatchingModuleSp(TrainableMatchingModule):
         if self.net is not None:
             super()._forward(xab, xba_t)
         
-        
         # edge pruning
         mask = self.mask_estimator(xab, xba_t)
+        mask[mask==1.0] = mask[mask==1.0].mean() # merge backword path.
 
         sd_adaptor = SparseDenseAdaptor(mask)
         xab = sd_adaptor.to_sparse(xab*mask)
         xba_t = sd_adaptor.to_sparse(xba_t*mask)
         
-        
         xab, xba_t = self._forward_sp(
             xab, 
             xba_t, 
-            sd_adaptor.src_vertex_id,
-            sd_adaptor.tar_vertex_id,
+            sd_adaptor.src_vertex_id, 
+            sd_adaptor.tar_vertex_id, 
         )
         
         m, mab, mba_t = self._forward_wrapup(xab, xba_t, sd_adaptor.src_vertex_id, sd_adaptor.tar_vertex_id)

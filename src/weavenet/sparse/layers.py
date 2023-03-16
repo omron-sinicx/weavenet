@@ -100,6 +100,57 @@ class LinearMaskInferenceOr(nn.Module):
         y[y==2.0] /= 2
         return y
 
+class NormBasedMaskInference(nn.Module):
+    r"""Selects edges based on linear prediction. The result for each direction is aggregated by OR rule.
+    
+    Args:
+        dim_src: `dim` of source vertex of edges.
+        dim_tar: `dim` of target vertex of edges.
+        drop_rate: sets drop rate of edges for each vertex. The OR rule selection may results in less drop-rate in actual calculations.
+        tau: the temperature of gumbel sigmoid.
+    
+    """
+    def __init__(self,
+                 dim_src:int=-3,
+                 dim_tar:int=-2,
+                 drop_rate:float = 0.5,
+                 tau:float = 1.0,
+                )->None:
+        super().__init__()
+        self.tau = tau
+        self.dim_src = dim_src
+        self.dim_tar = dim_tar
+        self.drop_rate = drop_rate
+        self.linear = None
+        
+        self.relu = torch.nn.ReLU()
+        
+    def forward(self,
+                xab: torch.Tensor,
+                xba_t: torch.Tensor,
+               )->Tuple[torch.Tensor,torch.Tensor]:        
+        r"""
+        Shape:
+           - xab: :math:`(B, N, M, C)`
+           - xba_t: :math:`(B, N, M, C)`
+           - output:  :math:`(B, N, M, C')`, where :math:`C'` is typically 1.
+           
+        Args:
+           xab: batched feature map, typically with the size of (B, N, M, C) where ij-th feature at :math:`(i, j)\in N \times M` represent edges from side `a` to `b`.
+           
+           xba_t: batched feature map with the same shape with xab, and represent edges from side `b` to `a`.
+
+        Returns:
+           - mask, where edges with score 1.0 are selected and 0.0 are dropped.
+        """
+
+        xab = self.relu(xab).norm(p=2,dim=-1, keepdim=True)
+        xab = _kthlargest_resampling(xab, self.dim_src, self.tau, self.drop_rate)
+        xba_t = self.relu(xba_t).norm(p=2,dim=-1, keepdim=True)
+        xba_t = _kthlargest_resampling(xba_t, self.dim_tar, self.tau, self.drop_rate)
+        y = xab + xba_t
+        y[y==2.0] /= 2
+        return y
 
 class SimilarityBasedMaskInference(nn:Module):
     r"""Inferences mask based on similarity.
