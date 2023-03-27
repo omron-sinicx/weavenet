@@ -6,12 +6,9 @@
 
 Sparse Layers
 ================ 
-  
+
 .. automodule:: weavenet.sparse.layers   
-   :members: 
-   
-.. automodule:: weavenet.sparse.layers   
-   :members: SparseDenseAdaptor, LinearMaskInferenceOr, MaxPoolingAggregatorSp, SetEncoderBaseSp, SetEncoderPointNetSp, DualSoftmaxSp, DualSoftmaxSqrtSp, 
+   :members: SparseDenseAdaptor, MaskSelectorByLinearInferenceOr, MaskSelectorByNorm, SimilarityBasedMaskInference, MaskSelectorRadiusNeighbor, MaskSelectorReciprocalNeighbor, MaxPoolingAggregatorSp, SetEncoderBaseSp, SetEncoderPointNetSp, DualSoftmaxSp, DualSoftmaxSqrtSp, 
    
 Experimental
 --------

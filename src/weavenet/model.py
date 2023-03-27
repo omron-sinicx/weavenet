@@ -26,10 +26,10 @@ class TrainableMatchingModule(nn.Module):
         
     **Example of Usage (1) Use WeaveNet to solve stable matching or any other combinatorial optimization**::
     
-        from weavenet import TrainableMatchingModule, WeaveNetHead
+        from weavenet import TrainableMatchingModule, WeaveNet
         
         weave_net = TrainableMatchingModule(
-            head = WeaveNetHead(2, [64]*6, [32]*6),
+            head = WeaveNet(2, [64]*6, [32]*6),
         )
 
         for xab, xba_t in batches:
@@ -40,11 +40,11 @@ class TrainableMatchingModule(nn.Module):
 
     **Example of Usage (2) Use WeaveNet for matching extracted features **::
     
-        from weavenet import TrainableMatchingModule, WeaveNetHead
+        from weavenet import TrainableMatchingModule, WeaveNet
         from layers import CrossConcatVertexFeatures
         
         weave_net = TrainableMatchingModule(
-            head = WeaveNetHead(2*vfeature_channels+2, [64]*6, [32]*6),
+            head = WeaveNet(2*vfeature_channels+2, [64]*6, [32]*6),
             pre_interactor = CrossConcatVertexFeatures(compute_similarity_cosine, softmax)
         )
 
@@ -57,19 +57,37 @@ class TrainableMatchingModule(nn.Module):
 
     """
     def __init__(self,
-                 head:nn.Module,
+                 net:nn.Module,
                  output_channels:int=1,
                  pre_interactor:Optional[CrossConcat] = CrossConcat(),
                  stream_aggregator:Optional[StreamAggregator] = DualSoftmaxSqrt(dim_src=-3, dim_tar=-2)):
         super().__init__()
         self.pre_interactor = pre_interactor
-        self.head = head
+        self.net = net
         self.last_layer = nn.Sequential(
-            nn.Linear(head.output_channels, output_channels, bias=False),
+            nn.Linear(net.output_channels, output_channels, bias=False),
             BatchNormXXC(output_channels),
         )
         self.stream_aggregator = stream_aggregator
         
+    def _forward(self, xab:torch.Tensor, xba_t:torch.Tensor)->Tuple[torch.Tensor, torch.Tensor]:
+        # first interaction
+        if self.pre_interactor is not None:
+            xab, xba_t = self.pre_interactor(xab, xba_t)
+            
+        # net
+        xab, xba_t = self.net.forward(xab, xba_t)
+        return xab, xba_t
+
+    def _forward_wrapup(self, xab:torch.Tensor, xba_t:torch.Tensor)->Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # wrap up into logits
+        xab_fut = torch.jit.fork(self.last_layer,xab)
+        xba_t = self.last_layer(xba_t)
+        # aggregate two streams while applying logistic regression.
+        return self.stream_aggregator(torch.jit.wait(xab_fut), xba_t)
+        
+
+                 
     def forward(self, xab:torch.Tensor, xba_t:torch.Tensor)->Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         r""" Try to match a bipartite agents on side `a` and `b`.
                 
@@ -86,20 +104,9 @@ class TrainableMatchingModule(nn.Module):
         Returns:
            A resultant tensor aggregated by stream_aggregator after processed through the network.
         """        
-        # first interaction
-        if self.pre_interactor is not None:
-            xab, xba_t = self.pre_interactor(xab, xba_t)
-            
-        # head
-        xab, xba_t = self.head.forward(xab, xba_t)
+        xab, xba_t = self._forward(xab, xba_t)
 
-        # wrap up into logits
-        xab = self.last_layer(xab)
-        xba_t = self.last_layer(xba_t)
-        
-        # aggregate two streams while applying logistic regression.
-        m, mab, mba_t = self.stream_aggregator(xab, xba_t)
-        return m, mab, mba_t
+        return self._forward_wrapup(xab, xba_t)
 
 UnitProcOrder = Literal['ena','nae','ean','ane']
 class Unit(nn.Module):
@@ -214,8 +221,8 @@ class UnitListGenerator():
         raise RuntimeError("This function must be implemented in each child class.")
         
 ExclusiveElementsOfUnit = Literal['none', 'normalizer', 'all'] # standard, biased, dual
-class MatchingModuleHead(nn.Module):
-    r""" A head of matching module. This controlls the way of interaction at each end of unit-process and residual paths.
+class MatchingNet(nn.Module):
+    r""" A neural network purposed on matching. This controlls the way of interaction at each end of unit-process and residual paths.
     
         Args:
            units_generator: an instance of :class:`UnitListGenerator` that generate unit-process.
@@ -237,13 +244,13 @@ class MatchingModuleHead(nn.Module):
             self.interactor = interactor
         units = units_generator.generate(interactor)
         # prepare for residual paths.
-        L = len(units)
+        self.L = len(units)
         self.keep_first_var_after = keep_first_var_after
         if calc_residual is None:
-            self.calc_residual = [False] * L
+            self.calc_residual = [False] * self.L
             self.use_residual = False
         else:            
-            assert(L == len(calc_residual))
+            assert(self.L == len(calc_residual))
             self.calc_residual = calc_residual
             self.use_residual = sum(self.calc_residual)>0
             assert(0 == sum(self.calc_residual[:self.keep_first_var_after]))
@@ -252,11 +259,8 @@ class MatchingModuleHead(nn.Module):
         
         self.input_channels = units_generator.input_channels
         
-        if interactor:
-            self.output_channels = self.interactor.output_channels(units_generator.output_channels_list[-1])
-        else:
-            self.output_channels = units_generator.output_channels_list[-1]
-
+        self.output_channels = units_generator.output_channels_list[-1]
+        
         
     def _build_two_stream_structure(self, 
                                     units:List[Unit],
@@ -314,7 +318,7 @@ class MatchingModuleHead(nn.Module):
         Returns:
            A pair of processed features.
         """
-        xab_keep, xba_t_keep = xab, xba_t
+        xab_keep, xba_t_keep = xab, xba_t        
         for l, (unit0, unit1) in enumerate(zip(self.stream0, self.stream1)):
             calc_res = self.calc_residual[l]
             xab_fut = torch.jit.fork(unit0, xab, dim_target=-2)
@@ -328,8 +332,8 @@ class MatchingModuleHead(nn.Module):
                 if calc_res:
                     xab_keep, xab = xab, xab + xab_keep
                     xba_t_keep, xba = xba_t, xba_t + xba_t_keep
-            
-            xab, xba_t = self.interactor(xab, xba_t)            
+            if l<self.L-1:
+                xab, xba_t = self.interactor(xab, xba_t)            
         
         return xab, xba_t
     
@@ -458,17 +462,17 @@ class ExperimentalUnitListGenerator(WeaveNetUnitListGenerator):
             for in_ch, mid_ch, out_ch in zip(in_channels_list, self.mid_channels_list, self.output_channels_list)
         ]
         
-class WeaveNetHead(MatchingModuleHead):
-    r""" A head for WeaveNet.
+class WeaveNet(MatchingNet):
+    r""" A WeaveNet backbone.
     
         Args:
             input_channels: input_channels for the first unit (see :class:`WeaveNetUnitListGenerator`).
             output_channels_list: output_channels for the units (see :class:`WeaveNetUnitListGenerator`). 
             mid_channels_list: mid_channels for each point-net-based set encoders (see :class:`WeaveNetUnitListGenerator`).
-            calc_residual: see :class:`MatchingModuleHead`
-            keep_first_var_after: see :class:`MatchingModuleHead`
-            exclusive_elements_of_unit: see :class:`MatchingModuleHead`
-            is_single_stream: see :class:`MatchingModuleHead`
+            calc_residual: see :class:`MatchingNet`
+            keep_first_var_after: see :class:`MatchingNet`
+            exclusive_elements_of_unit: see :class:`MatchingNet`
+            is_single_stream: see :class:`MatchingNet`
 
      """
     def __init__(self,
@@ -493,17 +497,17 @@ class WeaveNetHead(MatchingModuleHead):
             exclusive_elements_of_unit = exclusive_elements_of_unit,
         )        
         
-class ExperimentalHead(MatchingModuleHead):
+class ExperimentalNet(MatchingNet):
     r""" A head for the experimental Model.
     
         Args:
             input_channels: input_channels for the first unit (see :class:`ExperimentalUnitListGenerator`).
             output_channels_list: output_channels for the units (see :class:`ExperimentalUnitListGenerator`). 
             mid_channels_list: mid_channels for each point-net-based set encoders (see :class:`ExperimentalUnitListGenerator`).
-            calc_residual: see :class:`MatchingModuleHead`
-            keep_first_var_after: see :class:`MatchingModuleHead`
-            exclusive_elements_of_unit: see :class:`MatchingModuleHead`
-            is_single_stream: see :class:`MatchingModuleHead`
+            calc_residual: see :class:`MatchingNet`
+            keep_first_var_after: see :class:`MatchingNet`
+            exclusive_elements_of_unit: see :class:`MatchingNet`
+            is_single_stream: see :class:`MatchingNet`
 
      """
     def __init__(self,
@@ -529,9 +533,10 @@ class ExperimentalHead(MatchingModuleHead):
         
 
 if __name__ == "__main__":
+    pass
     #_ = WeaveNetOldImplementation(2, 2,1)
     _ = WeaveNet(
-            WeaveNetHead6(1,), 2, #input_channel:int,
+            WeaveNet6(1,), 2, #input_channel:int,
                  [4,8,16], #out_channels:List[int],
                  [2,4,8], #mid_channels:List[int],1,2,2)
                  calc_residual=[False, False, True],

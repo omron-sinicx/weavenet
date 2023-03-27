@@ -100,6 +100,7 @@ def loss_one2one_correlation_exp(mab : torch.Tensor, mba_t:Optional[torch.Tensor
         loss
     
     """
+    epsilon:float=10**-7
     mab, mba_t = _set_mba_t(mab, mba_t)
     mab_exp = torch.clamp(mab, epsilon).exp() # add epsilon to m for numerical stability.
     mba_t_exp = torch.clamp(mba_t, epsilon).exp() # add epsilon to m for numerical stability.

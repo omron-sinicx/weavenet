@@ -7,14 +7,14 @@
 Models
 ==================================================
 .. automodule:: weavenet.model
-   :members: TrainableMatchingModule, WeaveNetHead
+   :members: TrainableMatchingModule, WeaveNet
    
 Experimental
 --------------------------------
 .. automodule:: weavenet.model
-   :members: ExperimentalHead, ExperimentalUnitListGenerator
+   :members: ExperimentalNet, ExperimentalUnitListGenerator
    
 Private Models
 --------------------------------
 .. automodule:: weavenet.model
-   :members: Unit, UnitListGenerator, WeaveNetUnitListGenerator, MatchingModuleHead
+   :members: Unit, UnitListGenerator, WeaveNetUnitListGenerator, MatchingNet
