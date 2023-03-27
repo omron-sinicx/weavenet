@@ -19,7 +19,7 @@ package-dir = { "" = "src" }
 [tool.setuptools.packages.find]
 where = ["src"]
 # include = []
-# exclude = ["tests"]
+exclude = ["tests"]
 namespaces = true
 
 [tool.setuptools_scm]

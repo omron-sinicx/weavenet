@@ -244,13 +244,13 @@ class MatchingNet(nn.Module):
             self.interactor = interactor
         units = units_generator.generate(interactor)
         # prepare for residual paths.
-        L = len(units)
+        self.L = len(units)
         self.keep_first_var_after = keep_first_var_after
         if calc_residual is None:
-            self.calc_residual = [False] * L
+            self.calc_residual = [False] * self.L
             self.use_residual = False
         else:            
-            assert(L == len(calc_residual))
+            assert(self.L == len(calc_residual))
             self.calc_residual = calc_residual
             self.use_residual = sum(self.calc_residual)>0
             assert(0 == sum(self.calc_residual[:self.keep_first_var_after]))
@@ -259,11 +259,8 @@ class MatchingNet(nn.Module):
         
         self.input_channels = units_generator.input_channels
         
-        if interactor:
-            self.output_channels = self.interactor.output_channels(units_generator.output_channels_list[-1])
-        else:
-            self.output_channels = units_generator.output_channels_list[-1]
-
+        self.output_channels = units_generator.output_channels_list[-1]
+        
         
     def _build_two_stream_structure(self, 
                                     units:List[Unit],
@@ -321,7 +318,7 @@ class MatchingNet(nn.Module):
         Returns:
            A pair of processed features.
         """
-        xab_keep, xba_t_keep = xab, xba_t
+        xab_keep, xba_t_keep = xab, xba_t        
         for l, (unit0, unit1) in enumerate(zip(self.stream0, self.stream1)):
             calc_res = self.calc_residual[l]
             xab_fut = torch.jit.fork(unit0, xab, dim_target=-2)
@@ -335,8 +332,8 @@ class MatchingNet(nn.Module):
                 if calc_res:
                     xab_keep, xab = xab, xab + xab_keep
                     xba_t_keep, xba = xba_t, xba_t + xba_t_keep
-            
-            xab, xba_t = self.interactor(xab, xba_t)            
+            if l<self.L-1:
+                xab, xba_t = self.interactor(xab, xba_t)            
         
         return xab, xba_t
     
@@ -466,7 +463,7 @@ class ExperimentalUnitListGenerator(WeaveNetUnitListGenerator):
         ]
         
 class WeaveNet(MatchingNet):
-    r""" A head for WeaveNet.
+    r""" A WeaveNet backbone.
     
         Args:
             input_channels: input_channels for the first unit (see :class:`WeaveNetUnitListGenerator`).

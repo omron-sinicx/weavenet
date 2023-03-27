@@ -7,14 +7,14 @@
 Sparse Models
 ==================================================
 .. automodule:: weavenet.sparse.model
-   :members: TrainableMatchingModuleSp, WeaveNetHeadSp
+   :members: TrainableMatchingModuleSp, WeaveNetSp
    
 Experimental
 --------
 .. automodule:: weavenet.sparse.model
-   :members: ExperimentalHeadSp, ExperimentalUnitListGeneratorSp
+   :members: ExperimentalNetSp, ExperimentalUnitListGeneratorSp
    
 Private Models
 --------
 .. automodule:: weavenet.sparse.model
-   :members: UnitSp,  WeaveNetUnitListGeneratorSp, MatchingModuleHeadSp
+   :members: UnitSp,  WeaveNetUnitListGeneratorSp, MatchingNetSp

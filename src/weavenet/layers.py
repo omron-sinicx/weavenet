@@ -411,7 +411,7 @@ class StreamAggregatorTHRU(nn.Module):
     def set_xba_t(self, 
                   xab:torch.Tensor, 
                   xba_t:Optional[torch.Tensor],
-                     )->Tuple[torch.Tensor]:
+                     )->torch.Tensor:
         if xba_t is None:
             xba_t = xab
         return xba_t
@@ -448,7 +448,7 @@ class DualSoftmax(StreamAggregatorTHRU):
     .. math::
         \text{DualSoftmax}(x^{ab}_{ij}, x^{ba}_{ij}) = \frac{\exp(x^{ab}_{ij})}{\sum_j \exp(x^{ab}_{ij})} * \frac{\exp(x^{ba}_{ij})}{\sum_i \exp(x^{ba}_{ij})} 
 
-    In original definition, always :math:`x^{ba}=x^{ab}`. This is an extensional implementation that accepts :math:`x^{ba}\neq x^{ab}` to input the two stream outputs of `WeaveNet`. 
+    In original definition, always :math:`{x^{ba}}^T=x^{ab}`. This is an extensional implementation that accepts :math:`x^{ba}\neq x^{ab}` to input the two stream outputs of `WeaveNet`. 
     
     """
     def __init__(self, dim_src:int=-3, dim_tar:int=-2)->None:
@@ -483,7 +483,7 @@ class DualSoftmax(StreamAggregatorTHRU):
         Args:
            xab: 1st batched matrices.
            
-           xba_t: 2nd batched matrices. 
+           xba_t: 2nd batched matrices.  If None, **xab** is used as **xba_t**. 
            
            
         Returns:
@@ -505,23 +505,20 @@ class DualSoftmaxSqrt(DualSoftmax):
     """    
     def forward(self, 
                 xab:torch.Tensor, 
-                xba:Optional[torch.Tensor]=None, 
-                is_xba_transposed:bool=True)->Tuple[torch.Tensor,torch.Tensor,torch.Tensor]:
+                xba_t:Optional[torch.Tensor]=None)->Tuple[torch.Tensor,torch.Tensor,torch.Tensor]:
         r"""
         **Shape and Args**: same as :class:`DualSoftmax`
            
         Args:
            xab: 1st batched matrices.
            
-           xba: 2nd batched matrices. If None, **xab** is used as (transposed) **xba**. 
-           
-           is_xba_transposed: set **False** if :math:`(N_1, M_1)==(N_2, M_2)` and set **True** if :math:`(N_1, M_1)==(M_2, N_2)`. Default: **False**.
+           xba_t: 2nd batched matrices.  If None, **xab** is used as **xba_t**. 
            
         Returns:
            a triplet of **(mab * mba_t).sqrt()**, **mab** (=softmax(xab, dim=-2)), **mba_t** (=softmax(xba_t, dim=-1)
         """
         epsilon:float=10**-7
-        zab, zba_t = self._apply_softmax(xab, xba, is_xba_transposed)
+        zab, zba_t = self._apply_softmax(xab, xba_t)
         return torch.clamp(zab*zba_t, epsilon).sqrt(), zab, zba_t
 
 class DualSoftmaxFuzzyLogicAnd(DualSoftmax):
@@ -536,8 +533,7 @@ class DualSoftmaxFuzzyLogicAnd(DualSoftmax):
     """
     def forward(self,
                 xab:torch.Tensor, 
-                xba:Optional[torch.Tensor]=None, 
-                is_xba_transposed:bool=True)->Tuple[torch.Tensor,torch.Tensor,torch.Tensor]:
+                xba_t:Optional[torch.Tensor]=None)->Tuple[torch.Tensor,torch.Tensor,torch.Tensor]:
         r""" 
                 
         **Shape and Args**: same as :class:`DualSoftmax`
@@ -545,15 +541,13 @@ class DualSoftmaxFuzzyLogicAnd(DualSoftmax):
         Args:
            xab: 1st batched matrices.
            
-           xba: 2nd batched matrices. If None, **xab** is used as (transposed) **xba**. 
-           
-           is_ba_transposed: set **False** if :math:`(N_1, M_1)==(N_2, M_2)` and set **True** if :math:`(N_1, M_1)==(M_2, N_2)`. Default: **False**.
+           xba_t: 2nd batched matrices.  If None, **xab** is used as **xba_t**. 
            
         Returns:
            a triplet of **torch.min(mab, mba_t)**, **mab** (=softmax(xab, dim=-2)), **mba_t** (=softmax(xba_t, dim=-1)
            
         """
-        zab, zba_t = self._apply_softmax(xab, xba, is_xba_transposed)
+        zab, zba_t = self._apply_softmax(xab, xba_t)
         return zab.min(zba_t), zab, zba_t
         
 class CrossConcatVertexFeatures(Interactor):

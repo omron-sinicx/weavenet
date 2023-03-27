@@ -5,7 +5,7 @@ from typing import Optional, Callable, Tuple
 from torch_scatter import scatter_max #, scatter_min, scatter_mean
 from torch_scatter.composite import scatter_softmax
 
-from weavenet.layer import compute_cosine_similarity
+from ..layers import compute_cosine_similarity
 
 @torch.jit.ignore
 def _resampling_relaxed_Bernoulli(logits:torch.Tensor, tau:float)->torch.Tensor:
@@ -37,7 +37,7 @@ def _kthlargest_resampling(x: torch.Tensor, dim:int, tau:float, drop_rate:float)
     y_hard = (y_soft >= kth_val).to(x.dtype)
     return y_hard -y_soft.detach() + y_soft
                  
-class LinearMaskInferenceOr(nn.Module):
+class MaskSelectorByLinearInferenceOr(nn.Module):
     r"""Selects edges based on linear prediction. The result for each direction is aggregated by OR rule.
     
     Args:
@@ -76,7 +76,7 @@ class LinearMaskInferenceOr(nn.Module):
     def forward(self,
                 xab: torch.Tensor,
                 xba_t: torch.Tensor,
-               )->Tuple[torch.Tensor,torch.Tensor]:        
+               )->torch.Tensor:        
         r"""
         Shape:
            - xab: :math:`(B, N, M, C)`
@@ -100,7 +100,7 @@ class LinearMaskInferenceOr(nn.Module):
         y[y==2.0] /= 2
         return y
 
-class NormBasedMaskInference(nn.Module):
+class MaskSelectorByNorm(nn.Module):
     r"""Selects edges based on linear prediction. The result for each direction is aggregated by OR rule.
     
     Args:
@@ -121,14 +121,12 @@ class NormBasedMaskInference(nn.Module):
         self.dim_src = dim_src
         self.dim_tar = dim_tar
         self.drop_rate = drop_rate
-        self.linear = None
         
-        self.relu = torch.nn.ReLU()
         
     def forward(self,
                 xab: torch.Tensor,
                 xba_t: torch.Tensor,
-               )->Tuple[torch.Tensor,torch.Tensor]:        
+               )->torch.Tensor:        
         r"""
         Shape:
            - xab: :math:`(B, N, M, C)`
@@ -144,34 +142,16 @@ class NormBasedMaskInference(nn.Module):
            - mask, where edges with score 1.0 are selected and 0.0 are dropped.
         """
 
-        xab = self.relu(xab).norm(p=2,dim=-1, keepdim=True)
+        xab = xab.abs().norm(p=2,dim=-1, keepdim=True)
         xab = _kthlargest_resampling(xab, self.dim_src, self.tau, self.drop_rate)
-        xba_t = self.relu(xba_t).norm(p=2,dim=-1, keepdim=True)
+        xba_t = xba_t.abs().norm(p=2,dim=-1, keepdim=True)
         xba_t = _kthlargest_resampling(xba_t, self.dim_tar, self.tau, self.drop_rate)
         y = xab + xba_t
         y[y==2.0] /= 2
         return y
+    
 
-class SimilarityBasedMaskInference(nn:Module):
-    r"""Inferences mask based on similarity.
 
-        Args:
-            compute_similarity: a callable object that calculates a similarity matrix.
-            select_mask: a callable object that select a (differentiable) mask based on the similarity. [Default: :class:`MaskSelectorRadiusNeighbor`(0.0,0.5)].
-    """    
-    def __init__(self,
-                 compute_similarity:Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = compute_cosine_similarity,
-                 select_mask:Callable[[torch.Tensor], torch.Tensor] = MaskSelectorRadiusNeighbor(0.0, 0.5),
-                ):
-        self.compute_similarity = compute_similarity
-        self.select_mask = select_mask
-        
-    def forward(self,
-                xab: torch.Tensor,
-                xba_t: torch.Tensor,
-               )->torch.Tensor:
-        sim = self.compute_similarity(xab, xba_t)
-        return self.select_mask(sim)
     
 class MaskSelectorBySimilarity(nn.Module):
     r"""select mask for edge pruning with radius neighbor.
@@ -190,7 +170,7 @@ class MaskSelectorBySimilarity(nn.Module):
         self.max_survive_edges_per_sample = max_survive_edges_per_sample
         self.set_thresh_by_kthvalue = (0<=max_edge_survive_rate and  max_edge_survive_rate<1.0) or max_survive_edges_per_sample>0
         
-    def get_threshold_by_k(self, torch.Temsor sim, doim:int=-1, k:int=-1)->torch.Tensor:
+    def get_threshold_by_k(self, sim:torch.Tensor, dim:int=-1, k:int=-1)->torch.Tensor:
         r"""calculate threshold that prevend memory overflow, based on the params.
 
         Shape:
@@ -246,7 +226,7 @@ class MaskSelectorRadiusNeighbor(MaskSelectorBySimilarity):
         self.radius = radius
         assert(radius > 0.0 or self.set_thresh_by_kthvalue) 
                  
-    def forward(torch.Tensor sim)->torch.Tensor:
+    def forward(sim: torch.Tensor)->torch.Tensor:
         r"""
 
         Shape:
@@ -283,7 +263,7 @@ class MaskSelectorReciprocalNeighbor(MaskSelectorBySimilarity):
         self.k = k
         assert(k > 0 or self.set_thresh_by_kthvalue) 
        
-    def forward(torch.Tensor sim)->torch.Tensor:
+    def forward(sim:torch.Tensor)->torch.Tensor:
         r"""
 
         Shape:
@@ -293,10 +273,31 @@ class MaskSelectorReciprocalNeighbor(MaskSelectorBySimilarity):
         Return:
             a differential mask. Elements with mask==1 is selected.
         """
-        thresh2_fut = torch.jit.fork(self.get_threshold_by_k, sim, dim=-1, self.k)
-        thresh = self.get_threshold_by_k(sim, dim=-2, self.k)
+        thresh2_fut = torch.jit.fork(self.get_threshold_by_k, sim, dim=-1, k=self.k)
+        thresh = self.get_threshold_by_k(sim, dim=-2, k=self.k)
         thresh = thresh.min(torch.jit.wait(thresh2_fut))        
         return self.wrapup(sim, sim<thresh)
+
+class SimilarityBasedMaskInference(nn.Module):
+    r"""Inferences mask based on similarity.
+
+        Args:
+            compute_similarity: a callable object that calculates a similarity matrix.
+            select_mask: a callable object that select a (differentiable) mask based on the similarity. [Default: :class:`MaskSelectorRadiusNeighbor`(0.0,0.5)].
+    """    
+    def __init__(self,
+                 compute_similarity:Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = compute_cosine_similarity,
+                 mask_selector:Callable[[torch.Tensor], torch.Tensor] = MaskSelectorRadiusNeighbor(0.0, 0.5),
+                ):
+        self.compute_similarity = compute_similarity
+        self.mask_selector = mask_selector
+        
+    def forward(self,
+                xab: torch.Tensor,
+                xba_t: torch.Tensor,
+               )->torch.Tensor:
+        sim = self.compute_similarity(xab, xba_t)
+        return self.mask_selector(sim)    
     
 class SparseDenseAdaptor():
     r"""Adapt sparse-dense matrix conversion, based on a given **mask**.

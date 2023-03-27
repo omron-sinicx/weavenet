@@ -1,12 +1,12 @@
 import torch
 from torch import nn
 
-from ..model import TrainableMatchingModule, MatchingModule, Unit, UnitListGenerator, ExclusiveElementsOfUnit, UnitProcOrder
+from ..model import TrainableMatchingModule, MatchingNet, Unit, UnitListGenerator, ExclusiveElementsOfUnit, UnitProcOrder
 from .layers import *
 from ..layers import CrossConcat
 from typing import List, Tuple, Optional
 
-class TrainableMatchingModuleSp(TrainableMatchingModule):
+class TrainableMatchingModuleSp(nn.Module):
     r""" A variant of :class:`TrainableMatchingModule <weavenet.weavenet.TrainableMatchingModule>` that treats sparse bipartite graph.
 
     Args:
@@ -55,35 +55,43 @@ class TrainableMatchingModuleSp(TrainableMatchingModule):
     def __init__(self,
                  net_sparse: nn.Module, # typically MatchingModuleSparse
                  pre_interactor_sparse: Optional[CrossConcat] = CrossConcat(),
-                 mask_estimator:nn.Module=LinearMaskInferenceOr(tau=10.0, drop_rate=0.3),
+                 mask_selector:nn.Module=MaskSelectorByLinearInferenceOr(tau=10.0, drop_rate=0.3),
                  output_channels:int=1,
                  net_dense: Optional[nn.Module]=None, # typically MatchingModule
-                 pre_interactor_dense:Optional[CrossConcat] = None, # typically CrossConcat
+                 pre_interactor_dense:Optional[CrossConcat] = CrossConcat(), # typically CrossConcat
                  stream_aggregator:Optional[StreamAggregatorSp] = DualSoftmaxSqrtSp()):
-        super().__init__(net_dense, output_channels, pre_interactor_dense, stream_aggregator)
-        self.net_sparse = self.net_sparse
-        self.pre_interactor_sparse = self.pre_interactor_sparse
         
-        self.mask_estimator = mask_estimator            
-        if hasattr(self.mask_estimator, "build"):
-            self.mask_estimator.build(pre_net.output_channels, output_channels)
+        # avoid inheritance since jit does not support.
+        super().__init__()
+        self.parent = TrainableMatchingModule(
+            net=net_dense, 
+            output_channels = output_channels, 
+            pre_interactor = pre_interactor_dense)
+        self.stream_aggregator = stream_aggregator
+                
+        self.net_sparse = net_sparse
+        self.pre_interactor_sparse = pre_interactor_sparse
+        
+        self.mask_selector = mask_selector
+        if hasattr(self.mask_selector, "build"):
+            self.mask_selector.build(self.parent.net.output_channels, output_channels)
         
     def _forward_sp(self, xab:torch.Tensor, xba_t:torch.Tensor, 
                     src_vertex_id:torch.Tensor, tar_vertex_id:torch.Tensor)->Tuple[torch.Tensor, torch.Tensor]:
         
         # first interaction
-        if self.pre_interactor is not None:
+        if self.pre_interactor_sparse is not None:
             xab, xba_t = self.pre_interactor_sparse(xab, xba_t)
             
         # net
-        xab, xba_t = self.net_sparse.forward(xab, xba_t,src_vertex_id, tar_verted_id)
+        xab, xba_t = self.net_sparse.forward(xab, xba_t,src_vertex_id, tar_vertex_id)
         return xab, xba_t
         
     def _forward_wrapup(self, xab:torch.Tensor, xba_t:torch.Tensor, 
                src_vertex_id:torch.Tensor, tar_vertex_id:torch.Tensor)->Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # wrap up into logits
-        xab_fut = torch.jit.fork(self.last_layer(xab))
-        xba_t = self.last_layer(xba_t)
+        xab_fut = torch.jit.fork(self.parent.last_layer, xab)
+        xba_t = self.parent.last_layer(xba_t)
         
         # aggregate two streams while applying logistic regression.
         return self.stream_aggregator(torch.jit.wait(xab_fut), src_vertex_id, tar_vertex_id, xba=xba_t)
@@ -104,11 +112,11 @@ class TrainableMatchingModuleSp(TrainableMatchingModule):
         Returns:
            A resultant tensor aggregated by stream_aggregator after processed through the network.
         """      
-        if self.net is not None:
-            super()._forward(xab, xba_t)
+        if self.parent.net is not None:
+            xab, xba_t = self.parent._forward(xab, xba_t)
         
         # edge pruning
-        mask = self.mask_estimator(xab, xba_t)
+        mask = self.mask_selector(xab, xba_t)
         mask[mask==1.0] = mask[mask==1.0].mean() # merge backword path.
 
         sd_adaptor = SparseDenseAdaptor(mask)
@@ -127,7 +135,7 @@ class TrainableMatchingModuleSp(TrainableMatchingModule):
         mab_fut = torch.jit.fork(sd_adaptor.to_dense, mab)
         mba_t_fut =  torch.jit.fork(sd_adaptor.to_dense, mba_t)
         
-        if self.train:            
+        if self.training:            
             m = torch.jit.wait(m_fut)
             m[m==0] = mask[m==0] # backward path for negative edges. Not average for negative samples to deny clearly negative edges individually.
             mab = torch.jit.wait(mab_fut)
@@ -142,8 +150,8 @@ class TrainableMatchingModuleSp(TrainableMatchingModule):
         return m, mab, mba_t
 
 
-class MatchingModuleSp(MatchingModule):
-    r""" A net of matching module. This controlls the way of interaction at each end of unit-process and residual paths. See :class:`MatchingModule <weavenet.weavenet.MatchingModule>` for initialization.
+class MatchingNetSp(MatchingNet):
+    r""" A net of matching module. This controlls the way of interaction at each end of unit-process and residual paths. See :class:`MatchingNet <weavenet.weavenet.MatchingNet>` for initialization.
     
      """                
     def forward(self,
@@ -183,8 +191,8 @@ class MatchingModuleSp(MatchingModule):
                 if calc_res:
                     xab_keep, xab = xab, xab + xab_keep
                     xba_t_keep, xba = xba_t, xba_t + xba_t_keep
-            
-            xab, xba_t = self.interactor(xab, xba_t)            
+            if l < self.L - 1:
+                xab, xba_t = self.interactor(xab, xba_t)            
         
         return xab, xba_t
     
@@ -348,17 +356,17 @@ class ExperimentalUnitListGeneratorSp(UnitListGenerator):
             for in_ch, mid_ch, out_ch in zip(in_channels_list, self.mid_channels_list, self.out_channels_list)
         ]    
         
-class WeaveNetSp(MatchingModuleSp):
+class WeaveNetSp(MatchingNetSp):
     r""" Sparse version of :class:`WeaveNet <weavenet.weavenet.WeaveNet>`
 
         Args:
             input_channels: input_channels for the first unit (see :class:`WeaveNetUnitListGenerator <weavenet.weavenet.WeaveNetUnitListGenerator>`).
             output_channels_list: output_channels for the units (see :class:`WeaveNetUnitListGenerator <weavenet.weavenet.WeaveNetUnitListGenerator>`). 
             mid_channels_list: mid_channels for each point-net-based set encoders (see :class:`WeaveNetUnitListGenerator <weavenet.weavenet.WeaveNetUnitListGenerator>`).
-            calc_residual: see :class:`MatchingModule <weavenet.weavenet.MatchingModule>`
-            keep_first_var_after: see :class:`MatchingModule <weavenet.weavenet.MatchingModule>`
-            exclusive_elements_of_unit: see :class:`MatchingModule <weavenet.weavenet.MatchingModule>`
-            is_single_stream: see :class:`MatchingModule <weavenet.weavenet.MatchingModule>`
+            calc_residual: see :class:`MatchingNet <weavenet.weavenet.MatchingNet>`
+            keep_first_var_after: see :class:`MatchingNet <weavenet.weavenet.MatchingNet>`
+            exclusive_elements_of_unit: see :class:`MatchingNet <weavenet.weavenet.MatchingNet>`
+            is_single_stream: see :class:`MatchingNet <weavenet.weavenet.MatchingNet>`
 
     """
     def __init__(self,
@@ -383,17 +391,17 @@ class WeaveNetSp(MatchingModuleSp):
             exclusive_elements_of_unit = exclusive_elements_of_unit,
         )        
         
-class ExperimentalSp(MatchingModuleSp):
+class ExperimentalNetSp(MatchingNetSp):
     r""" Sparse version of :obj:`Experimental <weavenet.weavenet.Experimental>`
 
         Args:
             input_channels: input_channels for the first unit (see :class:`ExperimentalUnitListGenerator <weavenet.weavenet.ExperimentalUnitListGenerator>`).
             output_channels_list: output_channels for the units (see :class:`ExperimentalUnitListGenerator <weavenet.weavenet.ExperimentalUnitListGenerator>`). 
             mid_channels_list: mid_channels for each point-net-based set encoders (see :class:`ExperimentalUnitListGenerator <weavenet.weavenet.ExperimentalUnitListGenerator>`).
-            calc_residual: see :class:`MatchingModule <weavenet.weavenet.MatchingModule>`
-            keep_first_var_after: see :class:`MatchingModule <weavenet.weavenet.MatchingModule>`
-            exclusive_elements_of_unit: see :class:`MatchingModule <weavenet.weavenet.MatchingModule>`
-            is_single_stream: see :class:`MatchingModule <weavenet.weavenet.MatchingModule>`
+            calc_residual: see :class:`MatchingNet <weavenet.weavenet.MatchingNet>`
+            keep_first_var_after: see :class:`MatchingNet <weavenet.weavenet.MatchingModule>`
+            exclusive_elements_of_unit: see :class:`MatchingNet <weavenet.weavenet.MatchingNet>`
+            is_single_stream: see :class:`MatchingNet <weavenet.weavenet.MatchingNet>`
 
     """
     def __init__(self,
