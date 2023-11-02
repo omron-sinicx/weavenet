@@ -104,6 +104,14 @@ License: MIT License
 
 ### 📚 Citation
 ```
+@article{sone2023weavenet,
+  title={WeaveNet for Approximating Two-sided Matching Problems},
+  author={Shusaku Sone, Jiaxin Ma, Atsushi Hashimoto, Naoya Chiba, Yoshitaka Ushiku},
+  journal={arXiv preprint arXiv:2310.12515},
+  year={2023}
+}
+```
+```
 @article{yanagi2022edge,
   title={Edge-Selective Feature Weaving for Point Cloud Matching},
   author={Yanagi, Rintaro and Hashimoto, Atsushi and Sone, Shusaku and Chiba, Naoya and Ma, Jiaxin and Ushiku, Yoshitaka},
