@@ -1,8 +1,8 @@
 This repository is a portal for our weavenet projects.
 
-### 📄 Project papers
-1. [WeaveNet for Approximating Two-sided Matching Problems](https://arxiv.org/abs/2310.12515)
-2. [3D Point Cloud Registration with Learning-based Matching Algorithm](https://arxiv.org/abs/2202.02149) ([repository](https://github.com/omron-sinicx/EdgeSelectiveFeatureWeaving))
+### 📄 Project papers and repository
+1. [WeaveNet for Approximating Two-sided Matching Problems](https://arxiv.org/abs/2310.12515) (this repository)
+3. [3D Point Cloud Registration with Learning-based Matching Algorithm](https://arxiv.org/abs/2202.02149) ([repository](https://github.com/omron-sinicx/EdgeSelectiveFeatureWeaving))
 
 ### 🧰 API
 - [An API document for this repository](https://omron-sinicx.github.io/weavenet/main/)
