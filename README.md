@@ -1,11 +1,14 @@
-# weavenet components
-- an official re-implementation of WeaveNet and its components.
-- related papers
-  - [Stable Matching with WeaveNet](https://openreview.net/forum?id=ktHKpsbsxx)
-  - [Point Cloud Matching with (sparse) WeaveNet](https://arxiv.org/abs/2202.02149)
-  
-### 🦾 motivation
+This repository is a portal for our weavenet projects.
+
+### 📄 Project papers
+1. [WeaveNet for Approximating Two-sided Matching Problems](https://arxiv.org/abs/2310.12515)
+2. [3D Point Cloud Registration with Learning-based Matching Algorithm](https://arxiv.org/abs/2202.02149) ([repository](https://github.com/omron-sinicx/EdgeSelectiveFeatureWeaving))
+
+### 🧰 API
+- [An API document for this repository](https://omron-sinicx.github.io/weavenet/main/)
+### 🦾 motivation of the WeaveNet architecture
 - A trainable neural solver for general assignment tasks, including bipartite matching, linear assignment with stochastic noise, and stable matching (a.k.a. stable marriage problem).
+- It can be combined with feature extractor for registration tasks. See [this example](https://arxiv.org/abs/2202.02149) for more details.
 
 ### Requirements
 - This package requires python3.7+, pytorch, and torch-scatter.
@@ -78,7 +81,7 @@ matching = matching_module.forward(sab, sba_t) # matching.shape = [B, 1, N, M]
 ```
 Name: weavenet
 Version: 1.0.1
-Summary: an official re-implementation of WeaveNet and its components.
+Summary: an official implementation of WeaveNet and its components.
 Home-page: github.com/omron-sinicx/weavenet
 Author: Atsushi Hashimoto
 License: MIT License
