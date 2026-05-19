@@ -1,7 +1,7 @@
 # weavenet components
 - an official re-implementation of WeaveNet and its components.
 - related papers
-  - [Stable Matching with WeaveNet](https://openreview.net/forum?id=ktHKpsbsxx)
+  - [Stable Matching with WeaveNet](https://openreview.net/forum?id=ktHKpsbsxx) (for the stable matching usage, please use [this another repository](https://github.com/omron-sinicx/stable_matching_with_weavenet)).
   - [Point Cloud Matching with (sparse) WeaveNet](https://arxiv.org/abs/2202.02149)
   
 ### 🦾 motivation
