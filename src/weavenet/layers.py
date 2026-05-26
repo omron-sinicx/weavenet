@@ -549,7 +549,46 @@ class DualSoftmaxFuzzyLogicAnd(DualSoftmax):
         """
         zab, zba_t = self._apply_softmax(xab, xba_t)
         return zab.min(zba_t), zab, zba_t
-        
+
+class MeanAggregator(StreamAggregatorTHRU):
+    r"""
+
+    Aggregates two stream outputs by their arithmetic mean, returning raw
+    (un-normalized) values.
+
+    .. math::
+        \text{MeanAggregator}(x^{ab}_{ij}, x^{ba}_{ij}) = \frac{x^{ab}_{ij} + x^{ba}_{ij}}{2}
+
+    Use this when downstream code (typically the loss/criterion) is responsible
+    for any probability normalization, rather than baking softmax into the
+    network output. This is the aggregation used by the original WeaveNet
+    paper (arXiv:2310.12515): ``MatcherWeaveNet.forward`` averages the two
+    stream outputs as raw logits, then ``CriteriaStableMatching`` applies
+    ``softmax(., dim=-1)`` and ``softmax(., dim=-2)`` separately inside the
+    loss. Compose with such a criterion if you want to reproduce that recipe.
+
+    For contrast, :class:`DualSoftmaxSqrt` (the package default) folds the
+    softmax normalization into the network output itself.
+    """
+    def forward(self,
+                xab:torch.Tensor,
+                xba_t:Optional[torch.Tensor]=None)->Tuple[torch.Tensor,torch.Tensor,torch.Tensor]:
+        r"""
+
+        **Shape and Args**: same as :class:`DualSoftmax`
+
+        Args:
+           xab: 1st batched matrices.
+
+           xba_t: 2nd batched matrices. If None, **xab** is used as **xba_t**.
+
+        Returns:
+           a triplet of **(xab + xba_t) / 2**, **xab**, **xba_t**.
+
+        """
+        xba_t = self.set_xba_t(xab, xba_t)
+        return (xab + xba_t) / 2, xab, xba_t
+
 class CrossConcatVertexFeatures(Interactor):
     r""" CrossConcat vertex features for side `a` and `b`, which are typically provided from a feature extractor.
 
