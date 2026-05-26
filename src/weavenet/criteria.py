@@ -104,7 +104,7 @@ class CriteriaStableMatching():
             
             l = loss_fairness(m, sab, sba_t) 
             
-            loss += fairness_weight * l * ((loss.detach()<=0).max(torch.tensor([not gate_fairness_loss])).to(l.dtype))
+            loss += fairness_weight * l * ((loss.detach()<=0).max(torch.tensor([not gate_fairness_loss], device=l.device)).to(l.dtype))
             # equivalent to ...
             #  if not self.gate_fairness_loss:
             #    loss = fairness_weight * l
