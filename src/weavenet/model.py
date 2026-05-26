@@ -331,7 +331,7 @@ class MatchingNet(nn.Module):
                     xba_t_keep = xba_t
                 if calc_res:
                     xab_keep, xab = xab, xab + xab_keep
-                    xba_t_keep, xba = xba_t, xba_t + xba_t_keep
+                    xba_t_keep, xba_t = xba_t, xba_t + xba_t_keep
             if l<self.L-1:
                 xab, xba_t = self.interactor(xab, xba_t)            
         
