@@ -6,7 +6,7 @@ from .metric import default_stable_matching_metric
 from typing import Dict, Optional, List, Tuple
 
 
-class _BaseStableMatchingCriteria:
+class _BaseCriteriaStableMatching:
     r"""Internal base for stable-matching criteria classes.
 
     Subclasses implement :meth:`generate_criterion`; this base supplies the
@@ -21,7 +21,7 @@ class _BaseStableMatchingCriteria:
     metrics. Same-name-different-implementation is the expected
     polymorphism — e.g., :class:`CriteriaStableMatching` fills the
     ``loss_one2one`` slot with one of the ``loss_one2one_*`` functions,
-    while :class:`PerAxisSoftmaxCriteria` fills it with the
+    while :class:`CriteriaPerAxisStableMatching` fills it with the
     matrix-constraint normed-correlation form. Subclasses are free to
     override either list if their loss taxonomy is fundamentally different.
 
@@ -65,7 +65,7 @@ class _BaseStableMatchingCriteria:
 
     def generate_criterion(self):
         raise NotImplementedError(
-            "Subclasses of _BaseStableMatchingCriteria must implement generate_criterion()."
+            "Subclasses of _BaseCriteriaStableMatching must implement generate_criterion()."
         )
 
     @property
@@ -73,7 +73,7 @@ class _BaseStableMatchingCriteria:
         return 'loss_{}'.format(self.fairness)
 
 
-class CriteriaStableMatching(_BaseStableMatchingCriteria):
+class CriteriaStableMatching(_BaseCriteriaStableMatching):
     def __init__(self,
                  one2one_weight: float = 1.0,
                  stability_weight: float = 0.7,
@@ -265,7 +265,7 @@ def _per_batch_fairness(m: torch.Tensor, sab: torch.Tensor, sba: torch.Tensor) -
     return (sum_a - sum_b).abs() / N
 
 
-class PerAxisSoftmaxCriteria(_BaseStableMatchingCriteria):
+class CriteriaPerAxisStableMatching(_BaseCriteriaStableMatching):
     r"""Criterion that takes raw model logits, softmax-normalizes them along
     each spatial axis independently, computes each loss component on each
     axis-normalized view, and averages the per-axis losses.
@@ -410,7 +410,7 @@ class PerAxisSoftmaxCriteria(_BaseStableMatchingCriteria):
             log: Dict[str, torch.Tensor] = {
                 # Slot the paper's matrix-constraint term and unstability term
                 # into the universal `loss_one2one` / `loss_stability` slots
-                # declared by `_BaseStableMatchingCriteria.base_criterion_names`.
+                # declared by `_BaseCriteriaStableMatching.base_criterion_names`.
                 "loss_one2one": l_mat,
                 "loss_stability": l_uns,
             }
