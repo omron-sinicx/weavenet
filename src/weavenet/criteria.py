@@ -269,40 +269,63 @@ class PerAxisSoftmaxCriteria():
     (``constraint_p >= 0``) or ``|m_c - m_r|.mean()`` (``constraint_p < 0``).
 
     This criterion follows the loss formulation used in the original
-    WeaveNet paper (arXiv:2310.12515) verbatim. The hyperparameter naming
-    mirrors the legacy command-line flags::
+    WeaveNet paper (arXiv:2310.12515) verbatim. The first 5 constructor
+    args (``one2one_weight``, ``stability_weight``, ``fairness``,
+    ``fairness_weight``, ``gate_fairness_loss``) share names and defaults
+    with :class:`CriteriaStableMatching` so existing configs can swap
+    ``_target_`` between the two without touching other keys; the extra
+    paper-specific knobs (``satisfaction_weight``, ``balance_weight``,
+    ``constraint_p``) are appended and default to no-op values. Mapping to
+    the paper's command-line flags::
 
-        -m  -> matrix_constraint_weight  (lambda_m)
-        -u  -> stability_weight          (lambda_u)
-        -s  -> satisfaction_weight       (lambda_s)
-        -b  -> balance_weight            (lambda_b)
-        -f  -> fairness_weight           (lambda_f)
+        -m  -> one2one_weight        (lambda_m, the matrix constraint)
+        -u  -> stability_weight      (lambda_u)
+        -s  -> satisfaction_weight   (lambda_s)
+        -b  -> balance_weight        (lambda_b)
+        -f  -> fairness_weight       (lambda_f)
         -cp -> constraint_p
 
     Args:
-       matrix_constraint_weight: weight on the doubly-stochastic encouragement.
+       one2one_weight: weight on the doubly-stochastic / one-to-one
+         constraint term (the paper's matrix constraint). Same semantic
+         role as in :class:`CriteriaStableMatching`; the underlying
+         function differs (this class always uses the normed-correlation
+         form, no ``loss_one2one`` dispatch).
        stability_weight: weight on the (differentiable) blocking-pair proxy.
+       fairness: which fairness metric labels the run for downstream
+         best-checkpoint tracking. Same options as in
+         :class:`CriteriaStableMatching`: ``'sexequality'`` (default),
+         ``'egalitarian'``, ``'balance'``, or ``None``.
+       fairness_weight: weight on the fairness loss; passing ``0.0``
+         disables the term and nulls out ``self.fairness``.
+       gate_fairness_loss: if True, multiply the fairness term by
+         ``(stability_loss <= 0)`` so it only contributes once the
+         stability constraint has been satisfied. Same intent as in
+         :class:`CriteriaStableMatching` (modulo the per-sample
+         instead-of-per-batch granularity there).
        satisfaction_weight: weight on `-(sum_a + sum_b)/N` (maximize total).
        balance_weight: weight on `-min(sum_a, sum_b)/N` (maximize the weaker side).
-       fairness_weight: weight on `|sum_a - sum_b|/N` (sex-equality cost).
        constraint_p: p-norm in the matrix-constraint term; pass any
          negative value to fall back to the ``|m_c - m_r|.mean()`` form.
-       fairness: which fairness metric labels the run for downstream
-         best-checkpoint tracking. ``None`` (default) means the criterion
-         emits only the always-on loss keys.
     """
 
     def __init__(
         self,
-        matrix_constraint_weight: float = 1.0,
+        one2one_weight: float = 1.0,
         stability_weight: float = 0.7,
+        fairness: Optional[str] = 'sexequality',
+        fairness_weight: float = 0.1,
+        gate_fairness_loss: bool = False,
         satisfaction_weight: float = 0.0,
         balance_weight: float = 0.0,
-        fairness_weight: float = 0.0,
         constraint_p: float = 2.0,
-        fairness: Optional[str] = None,
     ) -> None:
-        self.matrix_constraint_weight = matrix_constraint_weight
+        # The first 5 args match CriteriaStableMatching's signature so a config
+        # can swap `_target_` between the two classes without touching keys.
+        # `loss_one2one` is intentionally NOT mirrored: this criterion always
+        # uses the matrix-constraint normed-correlation form (paper-spec), so
+        # there is nothing to dispatch on.
+        self.one2one_weight = one2one_weight
         self.stability_weight = stability_weight
         self.satisfaction_weight = satisfaction_weight
         self.balance_weight = balance_weight
@@ -310,21 +333,28 @@ class PerAxisSoftmaxCriteria():
         self.constraint_p = constraint_p
 
         # Active fairness label for downstream best-checkpoint tracking,
-        # mirroring CriteriaStableMatching's `self.fairness` semantics.
-        if fairness is not None and fairness_weight == 0.0 and balance_weight == 0.0:
+        # mirroring CriteriaStableMatching's `self.fairness` semantics:
+        # set to None if the corresponding weight is zero so the lit module
+        # falls back to is_success-based best tracking.
+        if fairness is not None and fairness_weight == 0.0:
             fairness = None
         self.fairness = fairness
-        # Lower-is-better for sex-equality cost; higher-is-better otherwise.
+        # Lower-is-better for sex-equality cost; higher-is-better otherwise
+        # (egalitarian / balance are framed as `-` of the cost, so larger is
+        # better in the val/best aggregate sense).
         self.larger_is_better = fairness != 'sexequality'
 
+        self.gate_fairness_loss = bool(gate_fairness_loss)
+
     def generate_criterion(self):
-        lambda_m = self.matrix_constraint_weight
+        lambda_m = self.one2one_weight
         lambda_u = self.stability_weight
         lambda_s = self.satisfaction_weight
         lambda_b = self.balance_weight
         lambda_f = self.fairness_weight
         constraint_p = self.constraint_p
         fairness = self.fairness
+        gate = self.gate_fairness_loss
 
         def criterion(
             m: torch.Tensor,
@@ -347,6 +377,13 @@ class PerAxisSoftmaxCriteria():
             l_sat = -(_per_batch_satisfaction(mc, sab, sba) + _per_batch_satisfaction(mr, sab, sba)) / 2
             l_bal = -(_per_batch_balance(mc, sab, sba) + _per_batch_balance(mr, sab, sba)) / 2
             l_fair = (_per_batch_fairness(mc, sab, sba) + _per_batch_fairness(mr, sab, sba)) / 2
+
+            # Mirror CriteriaStableMatching's `gate_fairness_loss` semantics:
+            # if gating is on, only apply the fairness term when the
+            # stability-side loss has been satisfied (`l_uns <= 0`).
+            if gate and (fairness is not None):
+                gate_mask = (l_uns.detach() <= 0).to(l_fair.dtype)
+                l_fair = l_fair * gate_mask
 
             total = (
                 lambda_m * l_mat
