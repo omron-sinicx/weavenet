@@ -14,6 +14,7 @@ __all__ = [
     'egalitarian_score',
     'balance_score',
     'calc_all_fairness_metrics',
+    'default_stable_matching_metric',
     'MatchingAccuracy',
 ]
 
@@ -234,3 +235,54 @@ def calc_all_fairness_metrics(m : torch.Tensor, cab : torch.Tensor, cba_t : torc
     #balance_ = torch.stack([batch_sum(m, cab, batch_size), batch_sum(m.transpose(-1,-2), cba, batch_size)]).max(dim=0)[0]
     #assert((balance ==  balance_).all())
     return se, egal, balance
+
+
+def default_stable_matching_metric(m: torch.Tensor, sab: torch.Tensor, sba_t: torch.Tensor):
+    r"""Default per-batch metric bundle for stable-matching criteria.
+
+    Binarizes the soft assignment ``m`` (argmax along the larger side) and
+    computes the family of metrics every stable-matching training tracks:
+
+    - ``is_one2one`` and ``is_stable`` (per-sample bools, as floats), and
+      their product ``is_success``,
+    - ``num_blocking_pair``,
+    - the three fairness scores (``sexequality``, ``egalitarian``, ``balance``).
+
+    Returned as ``(log, mb)`` where ``log`` is the dict above and ``mb`` is
+    the binarized assignment, so callers can re-use the discrete matching
+    without re-computing it. ``binarize``, ``is_one2one``, ``is_stable``,
+    ``count_blocking_pairs`` and ``calc_all_fairness_metrics`` run in
+    parallel via :func:`torch.jit.fork`.
+
+    Shape:
+       - ``m``:     ``(B, ..., N, M)`` or ``(B, ..., N, M, 1)``
+       - ``sab``:   ``(B, ..., N, M)``
+       - ``sba_t``: ``(B, ..., N, M)``
+
+    Args:
+       m:     soft (or already-binarized) matching to evaluate.
+       sab:   side-a satisfaction.
+       sba_t: side-b satisfaction transposed to share shape with ``sab``.
+
+    Returns:
+       ``(log, mb)``. ``log`` keys: ``is_one2one``, ``is_stable``,
+       ``is_success``, ``num_blocking_pair``, ``sexequality``,
+       ``egalitarian``, ``balance``. ``mb`` is the binarized matching.
+    """
+    mb = binarize(m)
+    futs = [
+        torch.jit.fork(is_one2one, mb),
+        torch.jit.fork(is_stable, mb, sab, sba_t),
+        torch.jit.fork(count_blocking_pairs, mb, sab, sba_t),
+    ]
+    log = {}
+    log['sexequality'], log['egalitarian'], log['balance'] = calc_all_fairness_metrics(
+        mb, sab, sba_t, pformat=PreferenceFormat.satisfaction,
+    )
+    temp_one2one = torch.jit.wait(futs[0])
+    temp_stable = torch.jit.wait(futs[1])
+    log['is_one2one'] = temp_one2one
+    log['is_stable'] = temp_stable
+    log['is_success'] = temp_one2one * temp_stable
+    log['num_blocking_pair'] = torch.jit.wait(futs[2])
+    return log, mb

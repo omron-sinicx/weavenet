@@ -1,40 +1,97 @@
 import torch
 import torch.nn.functional as F
 from .loss import loss_one2one_correlation_exp, loss_one2one_correlation, loss_one2many_penalty, loss_stability, loss_sexequality, loss_egalitarian, loss_balance
-from .metric import is_one2one, is_stable, binarize, calc_all_fairness_metrics, count_blocking_pairs, PreferenceFormat
+from .metric import default_stable_matching_metric
 
 from typing import Dict, Optional, List, Tuple
 
-class CriteriaStableMatching():
-    def __init__(self, 
+
+class _BaseStableMatchingCriteria:
+    r"""Internal base for stable-matching criteria classes.
+
+    Subclasses implement :meth:`generate_criterion`; this base supplies the
+    surface API (``fairness`` / ``larger_is_better`` / ``base_criterion_names``
+    / ``fairness_criterion_name`` / ``metric`` / ``metric_names``) consumed
+    by downstream lit modules.
+
+    The defaults for ``base_criterion_names`` and ``metric_names`` reflect
+    the universal semantic roles of a stable-matching criterion:
+    "encourage 1-to-1 structure" (``loss_one2one``) and "encourage
+    stability" (``loss_stability``); plus the corresponding fairness
+    metrics. Same-name-different-implementation is the expected
+    polymorphism — e.g., :class:`CriteriaStableMatching` fills the
+    ``loss_one2one`` slot with one of the ``loss_one2one_*`` functions,
+    while :class:`PerAxisSoftmaxCriteria` fills it with the
+    matrix-constraint normed-correlation form. Subclasses are free to
+    override either list if their loss taxonomy is fundamentally different.
+
+    Args:
+       fairness: which fairness metric labels the run for downstream
+         best-checkpoint tracking, one of ``'sexequality'``,
+         ``'egalitarian'``, ``'balance'``, or ``None``.
+       fairness_weight: scalar weight on the fairness term. Passing
+         ``0.0`` nulls out ``self.fairness``, so the lit module falls
+         back to ``is_success``-based best tracking.
+       gate_fairness_loss: if True, the fairness term is gated by the
+         satisfaction of the always-on losses. Concrete gating semantics
+         are defined by the subclass.
+    """
+
+    base_criterion_names: List[str] = ['loss_one2one', 'loss_stability']
+    metric_names: List[str] = [
+        'is_one2one', 'is_stable', 'is_success', 'num_blocking_pair',
+        'sexequality', 'egalitarian', 'balance',
+    ]
+    # default_stable_matching_metric lives in weavenet.metric and operates on
+    # binarized matchings, so it is criterion-independent — exposed here so
+    # subclasses inherit the same metric callable without duplication.
+    metric = staticmethod(default_stable_matching_metric)
+
+    def __init__(
+        self,
+        fairness: Optional[str] = 'sexequality',
+        fairness_weight: float = 0.1,
+        gate_fairness_loss: bool = False,
+    ) -> None:
+        if fairness_weight == 0.0:
+            fairness = None
+        self.fairness = fairness
+        self.fairness_weight = fairness_weight
+        self.gate_fairness_loss = bool(gate_fairness_loss)
+        # Lower-is-better for sex-equality cost; higher-is-better otherwise
+        # (egalitarian / balance are framed as `-` of the cost, so larger
+        # is better in the val/best aggregate sense).
+        self.larger_is_better = fairness != 'sexequality'
+
+    def generate_criterion(self):
+        raise NotImplementedError(
+            "Subclasses of _BaseStableMatchingCriteria must implement generate_criterion()."
+        )
+
+    @property
+    def fairness_criterion_name(self) -> str:
+        return 'loss_{}'.format(self.fairness)
+
+
+class CriteriaStableMatching(_BaseStableMatchingCriteria):
+    def __init__(self,
                  one2one_weight: float = 1.0,
                  stability_weight: float = 0.7,
-                 fairness: str = 'sexequality',
+                 fairness: Optional[str] = 'sexequality',
                  fairness_weight: float = 0.1,
                  loss_one2one: str = 'correlation_exp', # correlation | correlation_exp | maximize_sum
                  gate_fairness_loss: bool = False, # if True, consider fairness loss only when the condition was satisfied.
-                ): 
-        
+                ):
+        super().__init__(
+            fairness=fairness,
+            fairness_weight=fairness_weight,
+            gate_fairness_loss=gate_fairness_loss,
+        )
         self.loss_one2one = loss_one2one
-                    
         self.one2one_weight = one2one_weight
         self.stability_weight = stability_weight
-        self.fairness_weight = fairness_weight
-        
-        self.fairness = fairness
-        if fairness == 'sexequality':
-            self.larger_is_better = False
-        else: # 'egalitarian' or 'balance'
-            self.larger_is_better = True
-        self.fairness_weight = fairness_weight
-        if self.fairness_weight == 0.0:
-            self.fairness = None # self.fairness is None if fairness == None or fairness_weight == 0.0
-            
-        self.gate_fairness_loss = False
-        if gate_fairness_loss:
-            self.gate_fairness_loss = True
-            
-    def generate_criterion(self):      
+
+    def generate_criterion(self):
         if self.loss_one2one == 'correlation':
             loss_one2one = loss_one2one_correlation
         elif self.loss_one2one == 'correlation_exp':
@@ -43,10 +100,10 @@ class CriteriaStableMatching():
             loss_one2one = loss_one2many_penalty
         else:
             RuntimeError('Unknown loss_one2one function "{}".'.format(loss_one2one))
-        
+
         def _criterion_sm(
-            m: torch.Tensor, 
-            sab: torch.Tensor, 
+            m: torch.Tensor,
+            sab: torch.Tensor,
             sba_t: torch.Tensor,
             one2one_weight : float = self.one2one_weight,
             stability_weight: float = self.stability_weight,
@@ -55,19 +112,19 @@ class CriteriaStableMatching():
             fut_o = torch.jit.fork(loss_one2one,m)#ab, mba_t)
             l_s = loss_stability(m, sab, sba_t)
             l_o = torch.jit.wait(fut_o)
-            
+
             loss = one2one_weight * l_o
             log['loss_one2one'] = l_o
-        
+
             loss += stability_weight * l_s
             log['loss_stability'] = l_s
-                                            
+
             return loss, log
-        
+
         if self.fairness is None:
             def criterion_no_fairness(
-                m: torch.Tensor, 
-                sab: torch.Tensor, 
+                m: torch.Tensor,
+                sab: torch.Tensor,
                 sba_t: torch.Tensor,
                 one2one_weight : float = self.one2one_weight,
                 stability_weight: float = self.stability_weight,
@@ -77,12 +134,12 @@ class CriteriaStableMatching():
                 loss, log = _criterion_sm(m, sab, sba_t, one2one_weight, stability_weight)
                 if m.size(1)==1:
                     return loss, log
-                
+
                 return loss, log
-            return criterion_no_fairness                
-            
-            
-        if self.fairness == 'sexequality':            
+            return criterion_no_fairness
+
+
+        if self.fairness == 'sexequality':
             loss_fairness = loss_sexequality
         elif self.fairness == 'egalitarian':
             loss_fairness = loss_egalitarian
@@ -101,10 +158,10 @@ class CriteriaStableMatching():
         ):
             assert(m.size(-1)==1)
             m = m.squeeze(-1).unsqueeze(1) # B, N, M, C=1 -> B, C=1, N, M
-            loss, log = _criterion_sm(m, sab, sba_t)            
-            
-            l = loss_fairness(m, sab, sba_t) 
-            
+            loss, log = _criterion_sm(m, sab, sba_t)
+
+            l = loss_fairness(m, sab, sba_t)
+
             loss += fairness_weight * l * ((loss.detach()<=0).max(torch.tensor([not gate_fairness_loss], device=l.device)).to(l.dtype))
             # equivalent to ...
             #  if not self.gate_fairness_loss:
@@ -112,42 +169,10 @@ class CriteriaStableMatching():
             # else:
             #   loss = fairness_weight * l* (loss.detach()<=0)
             log[fairness_criterion_name] = l[:,0] # set it as B, N, M for later fairness - penalty calculation.
-            return loss, log            
+            return loss, log
 
-        
+
         return criterion
-    
-    @property
-    def base_criterion_names(self):
-        return ['loss_one2one', 'loss_stability']
-    
-    @property
-    def fairness_criterion_name(self):
-        return 'loss_{}'.format(self.fairness)        
-    
-    @staticmethod
-    def metric(m: torch.Tensor, sab: torch.Tensor, sba_t: torch.Tensor):   
-        mb = binarize(m)
-        futs = [
-            torch.jit.fork(is_one2one,mb),
-            torch.jit.fork(is_stable, mb, sab, sba_t),
-            torch.jit.fork(count_blocking_pairs, mb, sab, sba_t),
-        ]
-        log = {}        
-        log['sexequality'], log['egalitarian'], log['balance']= calc_all_fairness_metrics(mb, sab, sba_t, pformat = PreferenceFormat.satisfaction)
-        temp_one2one = torch.jit.wait(futs[0])
-        temp_stable =torch.jit.wait(futs[1])
-        log['is_one2one'] = temp_one2one
-        log['is_stable'] = temp_stable
-        log['is_success'] = temp_one2one * temp_stable
-        log['num_blocking_pair'] = torch.jit.wait(futs[2])
-
-        
-        return log, mb
-        
-    @property
-    def metric_names(self):
-        return ['is_one2one', 'is_stable', 'is_success', 'num_blocking_pair', 'sexequality', 'egalitarian','balance']
 
 
 def _normed_correlation_matrix_constraint(
@@ -240,7 +265,7 @@ def _per_batch_fairness(m: torch.Tensor, sab: torch.Tensor, sba: torch.Tensor) -
     return (sum_a - sum_b).abs() / N
 
 
-class PerAxisSoftmaxCriteria():
+class PerAxisSoftmaxCriteria(_BaseStableMatchingCriteria):
     r"""Criterion that takes raw model logits, softmax-normalizes them along
     each spatial axis independently, computes each loss component on each
     axis-normalized view, and averages the per-axis losses.
@@ -325,26 +350,16 @@ class PerAxisSoftmaxCriteria():
         # `loss_one2one` is intentionally NOT mirrored: this criterion always
         # uses the matrix-constraint normed-correlation form (paper-spec), so
         # there is nothing to dispatch on.
+        super().__init__(
+            fairness=fairness,
+            fairness_weight=fairness_weight,
+            gate_fairness_loss=gate_fairness_loss,
+        )
         self.one2one_weight = one2one_weight
         self.stability_weight = stability_weight
         self.satisfaction_weight = satisfaction_weight
         self.balance_weight = balance_weight
-        self.fairness_weight = fairness_weight
         self.constraint_p = constraint_p
-
-        # Active fairness label for downstream best-checkpoint tracking,
-        # mirroring CriteriaStableMatching's `self.fairness` semantics:
-        # set to None if the corresponding weight is zero so the lit module
-        # falls back to is_success-based best tracking.
-        if fairness is not None and fairness_weight == 0.0:
-            fairness = None
-        self.fairness = fairness
-        # Lower-is-better for sex-equality cost; higher-is-better otherwise
-        # (egalitarian / balance are framed as `-` of the cost, so larger is
-        # better in the val/best aggregate sense).
-        self.larger_is_better = fairness != 'sexequality'
-
-        self.gate_fairness_loss = bool(gate_fairness_loss)
 
     def generate_criterion(self):
         lambda_m = self.one2one_weight
@@ -393,8 +408,9 @@ class PerAxisSoftmaxCriteria():
                 + lambda_f * l_fair
             )
             log: Dict[str, torch.Tensor] = {
-                # Mapped to the existing CriteriaStableMatching log vocabulary so
-                # downstream code (lit modules, dashboards) tracks the same keys.
+                # Slot the paper's matrix-constraint term and unstability term
+                # into the universal `loss_one2one` / `loss_stability` slots
+                # declared by `_BaseStableMatchingCriteria.base_criterion_names`.
                 "loss_one2one": l_mat,
                 "loss_stability": l_uns,
             }
@@ -407,19 +423,3 @@ class PerAxisSoftmaxCriteria():
             return total, log
 
         return criterion
-
-    @property
-    def base_criterion_names(self) -> List[str]:
-        return ['loss_one2one', 'loss_stability']
-
-    @property
-    def fairness_criterion_name(self) -> str:
-        return 'loss_{}'.format(self.fairness) if self.fairness else 'loss_none'
-
-    @staticmethod
-    def metric(m: torch.Tensor, sab: torch.Tensor, sba_t: torch.Tensor):
-        return CriteriaStableMatching.metric(m, sab, sba_t)
-
-    @property
-    def metric_names(self) -> List[str]:
-        return ['is_one2one', 'is_stable', 'is_success', 'num_blocking_pair', 'sexequality', 'egalitarian', 'balance']
