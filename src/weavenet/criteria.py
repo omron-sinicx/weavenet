@@ -1,8 +1,9 @@
 import torch
+import torch.nn.functional as F
 from .loss import loss_one2one_correlation_exp, loss_one2one_correlation, loss_one2many_penalty, loss_stability, loss_sexequality, loss_egalitarian, loss_balance
 from .metric import is_one2one, is_stable, binarize, calc_all_fairness_metrics, count_blocking_pairs, PreferenceFormat
 
-from typing import Optional, List
+from typing import Dict, Optional, List, Tuple
 
 class CriteriaStableMatching():
     def __init__(self, 
@@ -147,4 +148,241 @@ class CriteriaStableMatching():
     @property
     def metric_names(self):
         return ['is_one2one', 'is_stable', 'is_success', 'num_blocking_pair', 'sexequality', 'egalitarian','balance']
-    
+
+
+def _normed_correlation_matrix_constraint(
+    m: torch.Tensor, p: float = 2.0, epsilon: float = 1e-7
+) -> torch.Tensor:
+    r"""Doubly-stochastic encouragement on a raw-logit batched matrix.
+
+    .. math::
+        d_M = 1 - Z \sum_{ij}
+              \frac{e^{m_{ij}}}{\|e^{m_{i,:}}\|_p}
+              \cdot
+              \frac{e^{m_{ij}}}{\|e^{m_{:,j}}\|_p},
+        \quad Z = \frac{N+M}{2NM}
+
+    Returns a per-batch scalar tensor of shape ``(B,)``.
+    """
+    m_exp = torch.clamp(m, min=epsilon).exp()
+    mc_norm = m_exp.norm(p=p, dim=-1, keepdim=True)
+    mr_norm = m_exp.norm(p=p, dim=-2, keepdim=True)
+    N, M = m.shape[-2:]
+    Z = (N + M) / (2 * N * M)
+    inner = (m_exp / mc_norm) * (m_exp / mr_norm)
+    return 1.0 - inner.sum(dim=(-1, -2)) * Z
+
+
+def _unstability_score(
+    sab: torch.Tensor,
+    sba: torch.Tensor,
+    m: torch.Tensor,
+    epsilon: float = 1e-7,
+) -> torch.Tensor:
+    r"""Differentiable proxy for the count of blocking pairs.
+
+    For every column ``c`` (i.e., side-``b`` agent):
+
+    .. math::
+        u^a_{i,c} = \sum_j m_{ij}\, \mathrm{ReLU}(s^{ab}_{ic} - s^{ab}_{ij})
+        \qquad
+        u^b_{c,i} = \sum_k m_{kc}\, \mathrm{ReLU}(s^{ba}_{ci} - s^{ba}_{ck})
+
+    and the per-batch loss is ``sum_{c, i} u^a_{i,c} * u^b_{c,i}``.
+
+    Intuition: ``u^a_{ic}`` is the amount of unhappiness side-``a`` agent
+    ``i`` would have if it could trade up to ``c``; ``u^b_{c,i}`` mirrors
+    that on side-``b``. Their product is non-zero only where *both* sides
+    would prefer to trade — i.e., where a blocking pair would form — so
+    minimizing the sum drives the soft assignment ``m`` toward stable
+    matchings.
+
+    Shapes:
+        - ``sab``: ``(B, N, M)``
+        - ``sba``: ``(B, M, N)``
+        - ``m``:   ``(B, N, M)`` (soft, typically a per-axis softmax of the
+          model output)
+        - returns: ``(B,)``
+    """
+    # sab_diff[b, i, c, j] = sab[b, i, c] - sab[b, i, j]
+    sab_diff = (sab.unsqueeze(-1) - sab.unsqueeze(-2)).clamp(min=epsilon)
+    # unsab[b, i, c] = sum_j m[b, i, j] * sab_diff[b, i, c, j]
+    unsab = (m.unsqueeze(-2) * sab_diff).sum(dim=-1)  # (B, N, M)
+
+    sba_diff = (sba.unsqueeze(-1) - sba.unsqueeze(-2)).clamp(min=epsilon)
+    m_T = m.transpose(-1, -2)  # (B, M, N)
+    # unsba[b, c, i] = sum_k m_T[b, c, k] * sba_diff[b, c, i, k]
+    unsba = (m_T.unsqueeze(-2) * sba_diff).sum(dim=-1)  # (B, M, N)
+
+    unsab_T = unsab.transpose(-1, -2)  # (B, M, N)
+    return (unsab_T * unsba).sum(dim=(-1, -2))  # (B,)
+
+
+def _per_batch_satisfaction(m: torch.Tensor, sab: torch.Tensor, sba: torch.Tensor) -> torch.Tensor:
+    """Total satisfaction `sum_a + sum_b` normalized by N. Per-batch shape ``(B,)``."""
+    N = sab.shape[-2]
+    return ((m * sab).sum(dim=(-1, -2)) + (m.transpose(-1, -2) * sba).sum(dim=(-1, -2))) / N
+
+
+def _per_batch_balance(m: torch.Tensor, sab: torch.Tensor, sba: torch.Tensor) -> torch.Tensor:
+    """Balanced satisfaction `min(sum_a, sum_b) / N`. Per-batch shape ``(B,)``."""
+    N = sab.shape[-2]
+    sum_a = (m * sab).sum(dim=(-1, -2))
+    sum_b = (m.transpose(-1, -2) * sba).sum(dim=(-1, -2))
+    return torch.minimum(sum_a, sum_b) / N
+
+
+def _per_batch_fairness(m: torch.Tensor, sab: torch.Tensor, sba: torch.Tensor) -> torch.Tensor:
+    """Sex-equality cost ``|sum_a - sum_b| / N``. Per-batch shape ``(B,)``."""
+    N = sab.shape[-2]
+    sum_a = (m * sab).sum(dim=(-1, -2))
+    sum_b = (m.transpose(-1, -2) * sba).sum(dim=(-1, -2))
+    return (sum_a - sum_b).abs() / N
+
+
+class PerAxisSoftmaxCriteria():
+    r"""Criterion that takes raw model logits, softmax-normalizes them along
+    each spatial axis independently, computes each loss component on each
+    axis-normalized view, and averages the per-axis losses.
+
+    Pairs with :class:`weavenet.layers.MeanAggregator` (raw mean of the two
+    stream outputs). The point is to leave probability normalization out of
+    the network and inside the loss, so that the model is supervised on
+    *both* a row-stochastic interpretation and a column-stochastic
+    interpretation of the same raw scores.
+
+    Compare with :class:`CriteriaStableMatching`, which assumes the input
+    ``m`` has already been turned into a probability-like matrix by, e.g.,
+    :class:`weavenet.layers.DualSoftmaxSqrt`, and computes a single loss
+    against that combined view.
+
+    .. math::
+        m_c &= \mathrm{softmax}(m,\ \mathrm{dim}=-1) \quad \text{(row-stochastic)} \\
+        m_r &= \mathrm{softmax}(m,\ \mathrm{dim}=-2) \quad \text{(column-stochastic)} \\
+        L &= \lambda_m\,L_{\text{matrix}}(m, m_c, m_r)
+             + \lambda_u\,\tfrac{L_{\text{uns}}(m_c) + L_{\text{uns}}(m_r)}{2}
+             + \lambda_s\,\tfrac{-L_{\text{sat}}(m_c) - L_{\text{sat}}(m_r)}{2} \\
+            & \quad + \lambda_b\,\tfrac{-L_{\text{bal}}(m_c) - L_{\text{bal}}(m_r)}{2}
+             + \lambda_f\,\tfrac{L_{\text{fair}}(m_c) + L_{\text{fair}}(m_r)}{2}
+
+    where :math:`L_{\text{matrix}}` is either the normed-correlation form
+    (``constraint_p >= 0``) or ``|m_c - m_r|.mean()`` (``constraint_p < 0``).
+
+    This criterion follows the loss formulation used in the original
+    WeaveNet paper (arXiv:2310.12515) verbatim. The hyperparameter naming
+    mirrors the legacy command-line flags::
+
+        -m  -> matrix_constraint_weight  (lambda_m)
+        -u  -> stability_weight          (lambda_u)
+        -s  -> satisfaction_weight       (lambda_s)
+        -b  -> balance_weight            (lambda_b)
+        -f  -> fairness_weight           (lambda_f)
+        -cp -> constraint_p
+
+    Args:
+       matrix_constraint_weight: weight on the doubly-stochastic encouragement.
+       stability_weight: weight on the (differentiable) blocking-pair proxy.
+       satisfaction_weight: weight on `-(sum_a + sum_b)/N` (maximize total).
+       balance_weight: weight on `-min(sum_a, sum_b)/N` (maximize the weaker side).
+       fairness_weight: weight on `|sum_a - sum_b|/N` (sex-equality cost).
+       constraint_p: p-norm in the matrix-constraint term; pass any
+         negative value to fall back to the ``|m_c - m_r|.mean()`` form.
+       fairness: which fairness metric labels the run for downstream
+         best-checkpoint tracking. ``None`` (default) means the criterion
+         emits only the always-on loss keys.
+    """
+
+    def __init__(
+        self,
+        matrix_constraint_weight: float = 1.0,
+        stability_weight: float = 0.7,
+        satisfaction_weight: float = 0.0,
+        balance_weight: float = 0.0,
+        fairness_weight: float = 0.0,
+        constraint_p: float = 2.0,
+        fairness: Optional[str] = None,
+    ) -> None:
+        self.matrix_constraint_weight = matrix_constraint_weight
+        self.stability_weight = stability_weight
+        self.satisfaction_weight = satisfaction_weight
+        self.balance_weight = balance_weight
+        self.fairness_weight = fairness_weight
+        self.constraint_p = constraint_p
+
+        # Active fairness label for downstream best-checkpoint tracking,
+        # mirroring CriteriaStableMatching's `self.fairness` semantics.
+        if fairness is not None and fairness_weight == 0.0 and balance_weight == 0.0:
+            fairness = None
+        self.fairness = fairness
+        # Lower-is-better for sex-equality cost; higher-is-better otherwise.
+        self.larger_is_better = fairness != 'sexequality'
+
+    def generate_criterion(self):
+        lambda_m = self.matrix_constraint_weight
+        lambda_u = self.stability_weight
+        lambda_s = self.satisfaction_weight
+        lambda_b = self.balance_weight
+        lambda_f = self.fairness_weight
+        constraint_p = self.constraint_p
+        fairness = self.fairness
+
+        def criterion(
+            m: torch.Tensor,
+            sab: torch.Tensor,
+            sba_t: torch.Tensor,
+        ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+            assert m.size(-1) == 1, f"expected channel last dim = 1, got {m.shape}"
+            m = m.squeeze(-1)            # (B, N, M)
+            sba = sba_t.transpose(-1, -2)  # (B, M, N)
+
+            mc = F.softmax(m, dim=-1)    # row-stochastic
+            mr = F.softmax(m, dim=-2)    # column-stochastic
+
+            if constraint_p >= 0:
+                l_mat = _normed_correlation_matrix_constraint(m, p=constraint_p)
+            else:
+                l_mat = (mc - mr).abs().mean(dim=(-1, -2))
+
+            l_uns = (_unstability_score(sab, sba, mc) + _unstability_score(sab, sba, mr)) / 2
+            l_sat = -(_per_batch_satisfaction(mc, sab, sba) + _per_batch_satisfaction(mr, sab, sba)) / 2
+            l_bal = -(_per_batch_balance(mc, sab, sba) + _per_batch_balance(mr, sab, sba)) / 2
+            l_fair = (_per_batch_fairness(mc, sab, sba) + _per_batch_fairness(mr, sab, sba)) / 2
+
+            total = (
+                lambda_m * l_mat
+                + lambda_u * l_uns
+                + lambda_s * l_sat
+                + lambda_b * l_bal
+                + lambda_f * l_fair
+            )
+            log: Dict[str, torch.Tensor] = {
+                # Mapped to the existing CriteriaStableMatching log vocabulary so
+                # downstream code (lit modules, dashboards) tracks the same keys.
+                "loss_one2one": l_mat,
+                "loss_stability": l_uns,
+            }
+            if fairness == "sexequality":
+                log["loss_sexequality"] = l_fair
+            elif fairness == "egalitarian":
+                log["loss_egalitarian"] = l_sat
+            elif fairness == "balance":
+                log["loss_balance"] = l_bal
+            return total, log
+
+        return criterion
+
+    @property
+    def base_criterion_names(self) -> List[str]:
+        return ['loss_one2one', 'loss_stability']
+
+    @property
+    def fairness_criterion_name(self) -> str:
+        return 'loss_{}'.format(self.fairness) if self.fairness else 'loss_none'
+
+    @staticmethod
+    def metric(m: torch.Tensor, sab: torch.Tensor, sba_t: torch.Tensor):
+        return CriteriaStableMatching.metric(m, sab, sba_t)
+
+    @property
+    def metric_names(self) -> List[str]:
+        return ['is_one2one', 'is_stable', 'is_success', 'num_blocking_pair', 'sexequality', 'egalitarian', 'balance']
