@@ -190,7 +190,7 @@ class MatchingNetSp(MatchingNet):
                     xba_t_keep = xba_t
                 if calc_res:
                     xab_keep, xab = xab, xab + xab_keep
-                    xba_t_keep, xba = xba_t, xba_t + xba_t_keep
+                    xba_t_keep, xba_t = xba_t, xba_t + xba_t_keep
             if l < self.L - 1:
                 xab, xba_t = self.interactor(xab, xba_t)            
         
@@ -214,12 +214,12 @@ class MatchingNetSp(MatchingNet):
                 vid = tar_vertex_id
             xab = unit(xab, vid)
             
-            if self.use_residual:              
-                if i==self.keep_first_var_after:
+            if self.use_residual:
+                if l==self.keep_first_var_after:
                     # keep values after the directed unit's process.
                     xab_keep = xab
                 if calc_res:
-                    xab_keep, xab = xab, xab + xab_keep            
+                    xab_keep, xab = xab, xab + xab_keep
         return xab, xab
     
 class UnitSp(Unit):
@@ -257,7 +257,7 @@ class UnitSp(Unit):
         return x
     
     def _forward_ean(self, x:torch.Tensor, vertex_id:torch.Tensor)->torch.Tensor:
-        x = self.encoder(x, vertex_idr)
+        x = self.encoder(x, vertex_id)
         if self.activator is not None:
             x = self.activator(x)
         if self.normalizer is not None:

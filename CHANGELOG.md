@@ -1,5 +1,39 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- `weavenet.sparse.layers._kthlargest_resampling`: K semantics were inverted —
+  `drop_rate=0.0` kept only 1 element and `drop_rate=1.0` kept all 100. Now keeps
+  `round(N * (1 - drop_rate))` elements as documented. This affected every
+  `MaskSelector*` in the live path (`MaskSelectorByLinearInferenceOr`,
+  `MaskSelectorByNorm`).
+- `weavenet.sparse.layers.SimilarityBasedMaskInference.__init__`: missing
+  `super().__init__()` caused `AttributeError` on construction.
+- `weavenet.sparse.layers.SparseDenseAdaptor`: index/value selection used
+  inconsistent cutoffs (`nonzero` vs `>0.5`); harmless for binary masks but
+  caused shape mismatches with non-binary masks. Standardized on `>0.5`.
+- `weavenet.sparse.model.MatchingNetSp.forward`: `xba_t` residual update was
+  silently dropped due to a `xba` typo (`xba_t_keep, xba = xba_t, xba_t + xba_t_keep`).
+- `weavenet.sparse.model.MatchingNetSp._forward_single_stream`: used undefined
+  `i` instead of the loop variable `l` in residual gate check.
+- `weavenet.sparse.model.UnitSp._forward_ean`: `vertex_idr` typo (missing `id`)
+  caused `NameError`.
+
+### Changed
+- `weavenet.sparse.layers.MaskSelectorBySimilarity` /
+  `MaskSelectorRadiusNeighbor` / `MaskSelectorReciprocalNeighbor`: marked as
+  **experimental** and now raise `NotImplementedError` on forward. The base
+  class's `get_threshold_by_k` references undefined names that suggest this
+  code path has never been executed. Use `MaskSelectorByLinearInferenceOr` or
+  `MaskSelectorByNorm` instead.
+- `weavenet.sparse.layers.MaskSelectorBySimilarity.wrapup`: changed `self.train`
+  (method reference, always truthy) to `self.training` (the actual boolean
+  flag set by `.train()` / `.eval()`).
+
+### Tests
+- Added `tests/test_sparse_fixes.py` covering all of the above (15 cases).
+
 ## [1.1.0] - 2026-05-26
 
 ### Added
