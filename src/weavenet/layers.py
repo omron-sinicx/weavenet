@@ -79,11 +79,11 @@ class Interactor(nn.Module):
     Abstract :class:`CrossConcat` and any other interactor between feature blocks of two stream architecture. It must have a function :func:`output_channels` to report its resultant feature's output channels (estimated based on the **input_channels**).    
     
     """    
-    def output_channels(self, input_channels:int)->torch.Tensor:        
+    def output_channels(self, input_channels:int)->int:
         r"""
         Args:
            input_channels: assumed input channels.
-           
+
         Returns:
            output_channels: **input_channels** (dummy)
         """
@@ -123,11 +123,11 @@ class CrossConcat(Interactor):
         super().__init__()
         self.dim_feature = dim_feature
     
-    def output_channels(self, input_channels:int)->torch.Tensor:
+    def output_channels(self, input_channels:int)->int:
         r"""
         Args:
            input_channels: assumed input channels.
-           
+
         Returns:
            output_channels: :math:`2*` **input_channels**
         """
@@ -171,11 +171,11 @@ class CrossDifferenceConcat(Interactor):
     def __init__(self, dim_feature:int=-1):
         super().__init__()
         self.dim_feature = dim_feature
-    def output_channels(self, input_channels:int)->torch.Tensor:
+    def output_channels(self, input_channels:int)->int:
         r"""
         Args:
            input_channels: assumed input channels.
-           
+
         Returns:
            output_channels: :math:`2*` **input_channels**
         """
@@ -390,14 +390,14 @@ class SetEncoderPointNetTotalDirectional(SetEncoderBase):
             raise RuntimeError("Unexpected dim_tar: {}. It must be -3 or -2.".format(dim_target))
         z_vertex_src = self.aggregator(z, dim_src)
         z_src_vertex_fut = torch.jit.fork(self.second_process_vertex, z_vertex_src)
-        z_vertex_tar = self.aggregator(z, dim_tar)
+        z_vertex_tar = self.aggregator(z, dim_target)
         z_tar_vertex_fut = torch.jit.fork(self.second_process_vertex, z_vertex_tar)
         z_vertex_all = self.aggregator(z_vertex_tar, dim_src)
         z_all_vertex =self.second_process_vertex(z_vertex_all)
                 
         return torch.jit.wait(z_edge_fut) + torch.jit.wait(z_src_vertex_fut) + torch.jit.wait(z_tar_vertex_fut) + z_all_vertex
         
-StreamAggregator = Callable[[torch.Tensor,Optional[torch.Tensor], bool],Tuple[torch.Tensor,torch.Tensor,torch.Tensor]]
+StreamAggregator = Callable[[torch.Tensor,Optional[torch.Tensor]],Tuple[torch.Tensor,torch.Tensor,torch.Tensor]]
 class StreamAggregatorTHRU(nn.Module):
     r"""
     
@@ -417,9 +417,9 @@ class StreamAggregatorTHRU(nn.Module):
         return xba_t
         
         
-    def forward(self, xab:torch.Tensor, 
-                      xba_t:Optional[torch.Tensor],
-                     )->Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, xab:torch.Tensor,
+                      xba_t:Optional[torch.Tensor]=None,
+                     )->Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         r""" Calculate the dual softmax for batched matrices.
                 
         Shape:
@@ -605,11 +605,12 @@ class CrossConcatVertexFeatures(Interactor):
              compute_similarity:Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
              directional_normalization:Optional[Callable[[torch.Tensor, int], torch.Tensor]] = None,
             ):
+        super().__init__()
         self.dim_a, self.dim_b, self.dim_feature = dim_a, dim_b, dim_feature
         self.compute_similarity = compute_similarity
         self.directional_normalization = directional_normalization
-        
-    def forward(self, xa:torch.Tensor, xb:torch.Tensor)->torch.Tensor:
+
+    def forward(self, xa:torch.Tensor, xb:torch.Tensor)->Tuple[torch.Tensor, torch.Tensor]:
         r""" Concat vertex features on the two sides `a` and `b`, while appending similarities based on the callback functions.
                 
         Shape:
@@ -626,17 +627,22 @@ class CrossConcatVertexFeatures(Interactor):
            A pair of edge-wise feature block tensors. Its feature consists of :math:`2*C`-dimensional features (whose :math:`ij`-th feature is a concatenation of :math:` and 1 or 2 dimensional similarities (depending on the callback function setting at :func:`__init__`.  
         """
         xa = xa.unsqueeze(dim = self.dim_b)
-        xb = xb.unsqueeze(dim = self.dim_a)        
-        shape = xa.shape
-        shape[self.dim_b] = xb.size(self.dim_b)        
-        
+        xb = xb.unsqueeze(dim = self.dim_a)
+        # torch.Size is immutable, so materialise a mutable list before editing.
+        shape = list(xa.shape)
+        shape[self.dim_b] = xb.size(self.dim_b)
+
         if self.compute_similarity is None:
-            return torch.cat([xa.expand(shape), xb.expand(shape)], dim=self.dim_feature)
-        
-        similarity_matrix = self.compute_similarity(xa, xb, dim=self.dim_feature)
-        shape_sim = shape
+            xa_e = xa.expand(shape)
+            xb_e = xb.expand(shape)
+            xab = torch.cat([xa_e, xb_e], dim=self.dim_feature)
+            xba_t = torch.cat([xb_e, xa_e], dim=self.dim_feature)
+            return xab, xba_t
+
+        similarity_matrix = self.compute_similarity(xa, xb)
+        shape_sim = list(shape)
         shape_sim[self.dim_feature] = 1
-        
+
         xa = xa.expand(shape)
         xb = xb.expand(shape)
         if self.directional_normalization is None:
@@ -644,12 +650,13 @@ class CrossConcatVertexFeatures(Interactor):
             xab = torch.cat([xa, sim, xb], dim=self.dim_feature)
             xba_t = torch.cat([xb, sim, xa], dim=self.dim_feature)
             return xab, xba_t
-        
-        sim_a = self.directional_normalization(similarity_matrix, dim=self.dim_a).view(shape_sim)
-        sim_b = self.directional_normalization(similarity_matrix, dim=self.dim_b).view(shape_sim)
+
+        sim_a = self.directional_normalization(similarity_matrix, self.dim_a).view(shape_sim)
+        sim_b = self.directional_normalization(similarity_matrix, self.dim_b).view(shape_sim)
         xab = torch.cat([xa, sim_a, xb, sim_b], dim=self.dim_feature)
         xba_t =  torch.cat([xb, sim_b, xa, sim_a], dim=self.dim_feature)
-        
+        return xab, xba_t
+
     def output_channels(self, input_channels:int)->int:
         r"""
         Args:

@@ -117,18 +117,18 @@ class MaskSelectorByLinearInferenceOr(nn.Module):
         self.dim_src = dim_src
         self.dim_tar = dim_tar
         self.drop_rate = drop_rate
-        self.linear = None
-        
+        self.linear: Optional[nn.Linear] = None
+
     def build(self,
               input_channels:int,
               output_channels:int = 1,)->None:
         r"""Build the linear layer for the prediction. This function is automatically called in :class:`TrainableMatchingModuleSp <weavenet.sparse.weavenet.TrainableMatchingModuleSp>`.
-        
+
         Args:
             input_channels: the number of input channels.
             output_channels: the number of output channels.
-            
-        """             
+
+        """
         self.linear = nn.Linear(input_channels, output_channels, bias=True)
 
         
@@ -151,6 +151,7 @@ class MaskSelectorByLinearInferenceOr(nn.Module):
            - mask, where edges with score 1.0 are selected and 0.0 are dropped.
         """
 
+        assert self.linear is not None, "build() must be called before forward()."
         xab = self.linear.forward(xab)
         xab = _kthlargest_resampling(xab, self.dim_src, self.tau, self.drop_rate)
         xba_t = self.linear.forward(xba_t)
@@ -418,8 +419,8 @@ class SetEncoderBaseSp(nn.Module):
        
     """
     def __init__(self, 
-                 first_process: Callable[[torch.Tensor], torch.Tensor], 
-                 aggregator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor], 
+                 first_process: Callable[[torch.Tensor], torch.Tensor],
+                 aggregator: Callable[[torch.Tensor, torch.Tensor, int], torch.Tensor],
                  second_process_edge: Callable[[torch.Tensor], torch.Tensor],
                  second_process_vertex: Callable[[torch.Tensor], torch.Tensor],
                  #return_vertex_feature:bool=False,
@@ -452,7 +453,7 @@ class SetEncoderBaseSp(nn.Module):
         """
         z_fut = torch.jit.fork(self.second_process_edge, x)
         z = self.first_process(x)
-        z_vertex = self.aggregator(z, vertex_id, dim=0)
+        z_vertex = self.aggregator(z, vertex_id, 0)
         z_vertex = self.second_process_vertex(z_vertex)        
         
         return torch.jit.wait(z_fut) + torch.index_select(z_vertex, 0, vertex_id)
@@ -564,11 +565,13 @@ class DualSoftmaxFuzzyLogicAndSp(DualSoftmaxSp):
     
     """
     def forward(self,
-                xab:torch.Tensor, 
-                xba:Optional[torch.Tensor]=None, 
-                is_xba_transposed:bool=True)->Tuple[torch.Tensor,torch.Tensor,torch.Tensor]:
-        r""" 
-        
+                xab:torch.Tensor,
+                src_id:torch.Tensor,
+                tar_id:torch.Tensor,
+                xba:Optional[torch.Tensor] = None,
+               )->Tuple[torch.Tensor,torch.Tensor,torch.Tensor]:
+        r"""
+
         **Shape and Args**: same as :class:`DualSoftmaxSp`
 
            
@@ -583,15 +586,4 @@ class DualSoftmaxFuzzyLogicAndSp(DualSoftmaxSp):
            
         """
         zab, zba = self.apply_softmax(xab, src_id, tar_id, xba=xba)
-        return zab.min(zba), zab, zba            
-
-if __name__ == "__main__":
-    #_ = WeaveNetOldImplementation(2, 2,1)
-    _ = WeaveNet(
-            WeaveNetStream(1,), 2, #input_channel:int,
-                 [4,8,16], #out_channels:List[int],
-                 [2,4,8], #mid_channels:List[int],1,2,2)
-                 calc_residual=[False, False, True],
-                 keep_first_var_after = 0,
-                 stream_aggregator = DualSoftMaxSqrt())
-    
+        return zab.min(zba), zab, zba

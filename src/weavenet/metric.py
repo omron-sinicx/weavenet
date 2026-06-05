@@ -155,7 +155,7 @@ def sexequality_cost(m : torch.Tensor, cab : torch.Tensor, cba_t : torch.Tensor,
     """
     if pformat != PreferenceFormat.cost:
         cab = to_cost(mat=cab, pformat=pformat, dim=-1)
-        cba = to_cost(mat=cba, pformat=pformat, dim=-2)
+        cba_t = to_cost(mat=cba_t, pformat=pformat, dim=-2)
     batch_size = m.size(0)
     return (batch_sum(m, cab, batch_size) - batch_sum(m, cba_t, batch_size)).abs()
 

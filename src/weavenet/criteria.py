@@ -99,7 +99,7 @@ class CriteriaStableMatching(_BaseCriteriaStableMatching):
         elif self.loss_one2one == 'loss_one2many_penalty':
             loss_one2one = loss_one2many_penalty
         else:
-            RuntimeError('Unknown loss_one2one function "{}".'.format(loss_one2one))
+            raise RuntimeError('Unknown loss_one2one function "{}".'.format(self.loss_one2one))
 
         def _criterion_sm(
             m: torch.Tensor,
