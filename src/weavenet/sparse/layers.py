@@ -2,10 +2,60 @@
 import torch
 from torch import nn
 from typing import Optional, Callable, Tuple
-from torch_scatter import scatter_max #, scatter_min, scatter_mean
-from torch_scatter.composite import scatter_softmax
 
 from ..layers import compute_cosine_similarity
+
+
+# ---------------------------------------------------------------------------
+# Native segment ops (replace torch_scatter; see omron-sinicx/weavenet #369/#367).
+#
+# torch_scatter ships version-locked compiled binaries with no prebuilt wheel for
+# recent torch+CUDA combinations, making it an unreproducible hidden dependency.
+# `torch.scatter_reduce_` (amax) and `scatter_add_` cover the only two ops the
+# sparse path needs, so we drop the external dependency entirely. Both helpers
+# operate along dim 0 — the only axis the sparse aggregators use (vertex_id is a
+# flat per-edge segment id).
+# ---------------------------------------------------------------------------
+
+def _segment_max(src: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+    r"""Per-segment maximum along dim 0 (drop-in for ``scatter_max(...)[0]``).
+
+    Shape:
+       - src:   :math:`(E, \ldots)`
+       - index: :math:`(E,)` segment id in ``[0, num_segments)``
+       - output: :math:`(num\_segments, \ldots)`
+
+    Segments that receive no edge are filled with 0, matching ``scatter_max``'s
+    default ``fill_value`` (a non-empty segment can never stay at the ``-inf``
+    sentinel, so the fill only ever touches genuinely empty segments).
+    """
+    num = int(index.max()) + 1 if index.numel() > 0 else 0
+    idx = index.view(-1, *([1] * (src.dim() - 1))).expand_as(src)
+    out = src.new_full((num, *src.shape[1:]), float("-inf"))
+    out.scatter_reduce_(0, idx, src, reduce="amax", include_self=False)
+    return out.masked_fill(out == float("-inf"), 0.0)
+
+
+def _segment_softmax(src: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+    r"""Per-segment softmax along dim 0 (drop-in for ``scatter_softmax``).
+
+    Numerically stabilised by subtracting the per-segment max before ``exp``,
+    then normalising by the per-segment sum — the same scheme ``scatter_softmax``
+    uses internally.
+
+    Shape:
+       - src:   :math:`(E, \ldots)`
+       - index: :math:`(E,)` segment id in ``[0, num_segments)``
+       - output: :math:`(E, \ldots)`
+    """
+    num = int(index.max()) + 1 if index.numel() > 0 else 0
+    idx = index.view(-1, *([1] * (src.dim() - 1))).expand_as(src)
+    seg_max = src.new_full((num, *src.shape[1:]), float("-inf"))
+    seg_max.scatter_reduce_(0, idx, src, reduce="amax", include_self=False)
+    exp = (src - seg_max[index]).exp()
+    seg_sum = exp.new_zeros((num, *exp.shape[1:]))
+    seg_sum.scatter_add_(0, idx, exp)
+    return exp / seg_sum[index]
 
 @torch.jit.ignore
 def _resampling_relaxed_Bernoulli(logits:torch.Tensor, tau:float)->torch.Tensor:
@@ -354,8 +404,8 @@ class MaxPoolingAggregatorSp(nn.Module):
            x_aggregated
 
         """        
-        x_max, _ = scatter_max(x_sp, vertex_id, dim)
-        return x_max
+        assert dim == 0, "sparse MaxPoolingAggregator only aggregates along dim 0"
+        return _segment_max(x_sp, vertex_id)
 
 class SetEncoderBaseSp(nn.Module):
     r"""A sparse version of :class:`SetEncoderBase <weavenet.layers.SetEncoderBase>`
@@ -446,8 +496,8 @@ class DualSoftmaxSp(nn.Module):
                      )->Tuple[torch.Tensor, torch.Tensor]:
         if xba is None:
             xba = xab
-        zab = scatter_softmax(xab, src_id, dim=0)
-        zba = scatter_softmax(xba, tar_id, dim=0)
+        zab = _segment_softmax(xab, src_id)
+        zba = _segment_softmax(xba, tar_id)
         return zab, zba
     
     
