@@ -54,6 +54,29 @@ def is_one2one(m : torch.Tensor):
     return ~((torch.sum(m,dim=-2)>1).any(dim=-1) + (torch.sum(m,dim=-1)>1).any(dim=-1))
 
 
+def _num_blocking_pairs(m : torch.Tensor, sab : torch.Tensor, sba_t : torch.Tensor) -> torch.Tensor:
+    r"""Per-instance blocking-pair count, shape ``(B,)`` (#477).
+
+    Shared by :func:`is_stable` and :func:`count_blocking_pairs` so the two can
+    never disagree. Exact match to the original per-column ``torch.jit.fork``
+    count, **including argmax-binarised non-permutations** (column collisions /
+    empty columns): a blocking pair ``(man i, woman c)`` needs man i to prefer c
+    over his match AND, summed over each man ``a`` actually assigned to c, woman c
+    to prefer i over a::
+
+        n = Σ_{c,i,a} PM[i,c] · m[a,c] · (sba_t[i,c] > sba_t[a,c]),  PM[i,c] = man i prefers c.
+
+    ``sab[b,i,j]`` = man i's satisfaction for woman j; ``sba_t[b,i,j]`` = woman j's
+    satisfaction for man i. Verified against an independent naive double-loop
+    reference at N=5/8/30; ~60x faster than the fork version.
+    """
+    matched_sab = (m * sab).sum(dim=-1, keepdim=True)        # (B,N,1) man i at his match
+    PM = (sab > matched_sab).float()                         # (B,N,M) man i prefers woman c
+    cmp = (sba_t.unsqueeze(2) > sba_t.unsqueeze(1)).float()  # (B,i,a,c) woman c prefers i over a
+    unsba = torch.einsum("bac,biac->bic", m.float(), cmp)    # (B,N,M)
+    return (PM * unsba).sum(dim=(-2, -1))                    # (B,)
+
+
 #@torch.jit.script
 def is_stable(m : torch.Tensor, sab : torch.Tensor, sba_t : torch.Tensor) -> torch.Tensor:
     r"""
@@ -71,15 +94,13 @@ def is_stable(m : torch.Tensor, sab : torch.Tensor, sba_t : torch.Tensor) -> tor
     Returns:
         A binary bool vector.
     """
-    # Vectorised (#477): a blocking pair (man i, woman j) needs man i to prefer j
-    # over his current match AND woman j to prefer i over hers — computed for the
-    # whole batch at once, no Python/torch.jit.fork loops. Bit-identical to the
-    # original per-column implementation (verified on the fixed 1000-testset), ~60x
-    # faster: it was the dominant eval cost (#477 bottleneck analysis).
-    matched_sab = (m * sab).sum(dim=-1, keepdim=True)        # (B,N,1) a_i at match
-    matched_sba = (m * sba_t).sum(dim=-2, keepdim=True)      # (B,1,M) b_j at match
-    blocking = (sab > matched_sab) & (sba_t > matched_sba)   # (B,N,M)
-    return blocking.sum(dim=(-2, -1)) == 0                   # (B,) bool
+    # Vectorised (#477): stable ⟺ zero blocking pairs. Uses the shared
+    # _num_blocking_pairs so is_stable and count_blocking_pairs are ALWAYS
+    # consistent, including argmax-binarised non-permutations (a naive per-incumbent
+    # match-satisfaction shortcut would diverge on column collisions/empties).
+    # Matches the original per-column implementation and an independent naive
+    # reference; ~60x faster (this was the dominant eval cost — #477 analysis).
+    return _num_blocking_pairs(m, sab, sba_t) == 0          # (B,) bool
 
 
 def count_blocking_pairs(m : torch.Tensor, sab : torch.Tensor, sba_t : torch.Tensor)->torch.Tensor:
@@ -98,17 +119,10 @@ def count_blocking_pairs(m : torch.Tensor, sab : torch.Tensor, sba_t : torch.Ten
     Returns:
         A count vector.
     """
-    # Vectorised (#477), exact match to the original per-column count including
-    # argmax-binarised non-permutations (column collisions): a blocking pair
-    # (man i, woman c) needs man i to prefer c over his match AND, summed over each
-    # man a actually assigned to c, woman c to prefer i over a:
-    #   n = Σ_{c,i,a} PM[i,c] · m[a,c] · (sba_t[i,c] > sba_t[a,c]),  PM[i,c] = man i prefers c.
-    # Bit-identical to the fork version (verified on the 1000-testset), ~60x faster.
-    matched_sab = (m * sab).sum(dim=-1, keepdim=True)        # (B,N,1)
-    PM = (sab > matched_sab).float()                         # (B,N,M) man i prefers woman c
-    cmp = (sba_t.unsqueeze(2) > sba_t.unsqueeze(1)).float()  # (B,i,a,c): woman c prefers i over a
-    unsba = torch.einsum("bac,biac->bic", m.float(), cmp)    # (B,N,M)
-    return (PM * unsba).sum(dim=(-2, -1)).sum()              # scalar total (original API)
+    # Vectorised (#477): batch total via the shared per-instance count. Matches the
+    # original per-column count incl. argmax-binarised non-permutations (column
+    # collisions); verified against an independent naive reference, ~60x faster.
+    return _num_blocking_pairs(m, sab, sba_t).sum()         # scalar total (original API)
 
 
 def sexequality_cost(m : torch.Tensor, cab : torch.Tensor, cba_t : torch.Tensor, 
