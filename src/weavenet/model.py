@@ -128,7 +128,11 @@ class Unit(nn.Module):
         self.normalizer = normalizer
         self.activator = activator
         self.order = order
-        self.forward = eval("self._forward_{}".format(order))
+        # Dynamic dispatch: bind `forward` to the order-specific implementation
+        # chosen at construction time. mypy cannot model assigning over a method,
+        # but this is the intended runtime behaviour (see `forward` below, which
+        # only raises if this binding ever failed).
+        self.forward = eval("self._forward_{}".format(order))  # type: ignore[method-assign]
         
     def _forward_ena(self, x:torch.Tensor, dim_target:int)->torch.Tensor:
         x = self.encoder(x, dim_target)
@@ -146,7 +150,7 @@ class Unit(nn.Module):
         return x
     
     def _forward_ean(self, x:torch.Tensor, dim_target:int)->torch.Tensor:
-        x = self.encoder(x, dim_tar)
+        x = self.encoder(x, dim_target)
         if self.activator is not None:
             x = self.activator(x)
         if self.normalizer is not None:
@@ -273,7 +277,10 @@ class MatchingNet(nn.Module):
             # !!!override forward by forward_single_stream!!!
             assert(exclusive_elements_of_unit=='none') 
             # assert non-default exclusive_... value for the fail-safe (the value is ignored when is_single_stream==True).
-            self.forward = self._forward_single_stream
+            # Dynamic dispatch: single-stream mode rebinds forward to the
+            # transpose-based single-stream implementation. Intended runtime
+            # behaviour; mypy cannot model assigning over a method.
+            self.forward = self._forward_single_stream  # type: ignore[method-assign]
             self.stream = nn.ModuleList(units)
         # make 2nd stream
         elif exclusive_elements_of_unit == 'none':
@@ -416,45 +423,17 @@ class ExperimentalUnitListGenerator(WeaveNetUnitListGenerator):
            mid_channels_list: mid_channels for each point-net-based set encoders.
            output_channels_list: output_channels for the units. 
         """            
-    class Encoder(SetEncoderBase):
-        r""" A sample of experimental unit encoder.
-    
-        Args:
-           in_channels: input_channels for the first unit.
-           mid_channels_list: mid_channels for each point-net-based set encoders.
-           output_channels_list: output_channels for the units. 
-        """            
-        def __init__(self, in_channels:int, mid_channels:int, output_channels:int, **kwargs):
-            r"""        
-            Args:
-                in_channels: the number of input channels.
-                mid_channels: the number of output channels at the first convolution.
-                output_channels: the number of output channels at the second convolution.
-
-            """ 
-            first_process = nn.Linear(in_channels, mid_channels)
-            second_process = nn.Linear(in_channels + mid_channels, output_channels, bias=False)    
-
-            super().__init__(
-                first_process, 
-                MaxPoolingAggregator(),
-                DifferenceConcatMerger(dim_feature=-1),
-                second_process,
-                **kwargs,
-            )
-            
     def _build(self, in_channels_list:List[int]):
         r""" Generates the list of experimental units. Customizing this class makes it easy to test a new primitive weavenet structure.
-                           
+
         Args:
            in_channels_list: the list of in_channels calculated in :func:`generate`.
-           
+
         Returns:
-           a list of experimental units. 
+           a list of experimental units.
         """
         return [
             Unit(
-                #self.Encoder(in_ch, mid_ch, out_ch),
                 SetEncoderPointNetCrossDirectional(in_ch, mid_ch, out_ch),
                 'ena',
                 BatchNormXXC(out_ch),
@@ -529,17 +508,5 @@ class ExperimentalNet(MatchingNet):
             calc_residual = calc_residual,
             keep_first_var_after = keep_first_var_after,
             exclusive_elements_of_unit = exclusive_elements_of_unit,
-        )        
-        
+        )
 
-if __name__ == "__main__":
-    pass
-    #_ = WeaveNetOldImplementation(2, 2,1)
-    _ = WeaveNet(
-            WeaveNet6(1,), 2, #input_channel:int,
-                 [4,8,16], #out_channels:List[int],
-                 [2,4,8], #mid_channels:List[int],1,2,2)
-                 calc_residual=[False, False, True],
-                 keep_first_var_after = 0,
-                 stream_aggregator = DualSoftMaxSqrt())
-                 

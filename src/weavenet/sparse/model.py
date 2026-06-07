@@ -94,7 +94,7 @@ class TrainableMatchingModuleSp(nn.Module):
         xba_t = self.parent.last_layer(xba_t)
         
         # aggregate two streams while applying logistic regression.
-        return self.stream_aggregator(torch.jit.wait(xab_fut), src_vertex_id, tar_vertex_id, xba=xba_t)
+        return self.stream_aggregator(torch.jit.wait(xab_fut), src_vertex_id, tar_vertex_id, xba_t)
 
     def forward(self, xab:torch.Tensor, xba_t:torch.Tensor)->Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         r""" Try to match a bipartite agents on side `a` and `b`.
@@ -154,8 +154,11 @@ class MatchingNetSp(MatchingNet):
     r""" A net of matching module. This controlls the way of interaction at each end of unit-process and residual paths. See :class:`MatchingNet <weavenet.weavenet.MatchingNet>` for initialization.
     
      """                
-    def forward(self,
-                xab:torch.Tensor, 
+    # The sparse net forward additionally threads per-edge src/tar vertex ids
+    # through the layers, an inherent dense/sparse API divergence that is not
+    # LSP-substitutable with the dense MatchingNet.forward(xab, xba_t).
+    def forward(self,  # type: ignore[override]
+                xab:torch.Tensor,
                 xba_t:torch.Tensor,
                 src_vertex_id:torch.Tensor,
                 tar_vertex_id:torch.Tensor,
@@ -190,14 +193,14 @@ class MatchingNetSp(MatchingNet):
                     xba_t_keep = xba_t
                 if calc_res:
                     xab_keep, xab = xab, xab + xab_keep
-                    xba_t_keep, xba = xba_t, xba_t + xba_t_keep
+                    xba_t_keep, xba_t = xba_t, xba_t + xba_t_keep
             if l < self.L - 1:
                 xab, xba_t = self.interactor(xab, xba_t)            
         
         return xab, xba_t
     
-    def _forward_single_stream(self, 
-                              xab:torch.Tensor, 
+    def _forward_single_stream(self,  # type: ignore[override]
+                              xab:torch.Tensor,
                               xba_t:torch.Tensor,
                               src_vertex_id:torch.Tensor,
                               tar_vertex_id:torch.Tensor,
@@ -214,12 +217,12 @@ class MatchingNetSp(MatchingNet):
                 vid = tar_vertex_id
             xab = unit(xab, vid)
             
-            if self.use_residual:              
-                if i==self.keep_first_var_after:
+            if self.use_residual:
+                if l==self.keep_first_var_after:
                     # keep values after the directed unit's process.
                     xab_keep = xab
                 if calc_res:
-                    xab_keep, xab = xab, xab + xab_keep            
+                    xab_keep, xab = xab, xab + xab_keep
         return xab, xab
     
 class UnitSp(Unit):
@@ -239,16 +242,21 @@ class UnitSp(Unit):
                  normalizer:Optional[nn.Module]=None, 
                  activator:Optional[nn.Module]=None):
         super().__init__(encoder, order, normalizer, activator)
-        self.forward = eval("self._forward_{}".format(order))
-        
-    def _forward_ena(self, x:torch.Tensor, vertex_id:torch.Tensor)->torch.Tensor:
+        # Dynamic dispatch: bind forward to the order-specific implementation,
+        # mirroring the dense Unit. mypy cannot model assigning over a method.
+        self.forward = eval("self._forward_{}".format(order))  # type: ignore[method-assign]
+
+    # The sparse Unit takes a per-edge ``vertex_id`` tensor where the dense
+    # Unit takes an integer ``dim_target``: an inherent dense/sparse API
+    # divergence that is not LSP-substitutable, hence the override ignores.
+    def _forward_ena(self, x:torch.Tensor, vertex_id:torch.Tensor)->torch.Tensor:  # type: ignore[override]
         x = self.encoder(x, vertex_id)
         if self.normalizer is not None:
             x = self.normalizer(x)
         if self.activator is not None:
             x = self.activator(x)
         return x
-    def _forward_nae(self, x:torch.Tensor, vertex_id:torch.Tensor)->torch.Tensor:
+    def _forward_nae(self, x:torch.Tensor, vertex_id:torch.Tensor)->torch.Tensor:  # type: ignore[override]
         if self.normalizer is not None:
             x = self.normalizer(x)
         if self.activator is not None:
@@ -256,15 +264,15 @@ class UnitSp(Unit):
         x = self.encoder(x, vertex_id)
         return x
     
-    def _forward_ean(self, x:torch.Tensor, vertex_id:torch.Tensor)->torch.Tensor:
-        x = self.encoder(x, vertex_idr)
+    def _forward_ean(self, x:torch.Tensor, vertex_id:torch.Tensor)->torch.Tensor:  # type: ignore[override]
+        x = self.encoder(x, vertex_id)
         if self.activator is not None:
             x = self.activator(x)
         if self.normalizer is not None:
             x = self.normalizer(x)
         return x
     
-    def _forward_ane(self, x:torch.Tensor, vertex_id:torch.Tensor)->torch.Tensor:
+    def _forward_ane(self, x:torch.Tensor, vertex_id:torch.Tensor)->torch.Tensor:  # type: ignore[override]
         if self.activator is not None:
             x = self.activator(x)
         if self.normalizer is not None:
@@ -272,9 +280,9 @@ class UnitSp(Unit):
         x = self.encoder(x, vertex_id)
         return x
     
-    def forward(self, x:torch.Tensor, vertex_id:torch.Tensor)->torch.Tensor:
+    def forward(self, x:torch.Tensor, vertex_id:torch.Tensor)->torch.Tensor:  # type: ignore[override]
         r""" Applies unit process. This function is replaced to any of Unit._forward_* functions in :func:`__init__` based on the argument **order**.
-                
+
         Shape:
            - x: :math:`(\text{num_edges_in_batch}, C)`
            - vertex_id: :math:`(\text{num_edges_in_batch})`
@@ -318,43 +326,24 @@ class WeaveNetUnitListGeneratorSp(UnitListGenerator):
             for in_ch, mid_ch, out_ch in zip(in_channels_list, self.mid_channels_list, self.output_channels_list)
         ]
         
-class ExperimentalUnitListGeneratorSp(UnitListGenerator):
+class ExperimentalUnitListGeneratorSp(WeaveNetUnitListGeneratorSp):
     r""" Sparse version of :class:`ExperimentalUnitListGenerator <weavenet.weavenet.ExperimentalUnitListGenerator>`
-    
+
         Args:
            input_channels: input_channels for the first unit.
            mid_channels_list: mid_channels for each point-net-based set encoders.
-           output_channels_list: output_channels for the units. 
-    """            
-    
-    class Encoder(SetEncoderBaseSp):
-        def __init__(self, in_channels:int, mid_channels:int, output_channels:int, **kwargs):
-            r"""        
-            Args:
-                in_channels: the number of input channels.
-                mid_channels: the number of output channels at the first convolution.
-                output_channels: the number of output channels at the second convolution.
+           output_channels_list: output_channels for the units.
+    """
 
-            """ 
-            first_process = nn.Linear(in_channels, mid_channels)
-            second_process = nn.Linear(in_channels + mid_channels, output_channels, bias=False)    
-
-            super().__init__(
-                first_process, 
-                MaxPoolingAggregatorSp(),
-                DifferenceConcatMerger(dim_feature=-1),
-                second_process,
-                **kwargs,
-            )
     def _build(self, in_channels_list:List[int]):
         return [
             UnitSp(
-                self.Encoder(in_ch, mid_ch, out_ch),
+                SetEncoderPointNetSp(in_ch, mid_ch, out_ch),
                 'ena',
                 nn.BatchNorm1d(out_ch),
                 nn.PReLU(),)
-            for in_ch, mid_ch, out_ch in zip(in_channels_list, self.mid_channels_list, self.out_channels_list)
-        ]    
+            for in_ch, mid_ch, out_ch in zip(in_channels_list, self.mid_channels_list, self.output_channels_list)
+        ]
         
 class WeaveNetSp(MatchingNetSp):
     r""" Sparse version of :class:`WeaveNet <weavenet.weavenet.WeaveNet>`
@@ -406,14 +395,14 @@ class ExperimentalNetSp(MatchingNetSp):
     """
     def __init__(self,
                  input_channels:int,
-                 output_channels:List[int],
-                 mid_channels:List[int],
+                 output_channels_list:List[int],
+                 mid_channels_list:List[int],
                  calc_residual:Optional[List[bool]]=None,
                  keep_first_var_after:int=0,
                  exclusive_elements_of_unit:ExclusiveElementsOfUnit='none',
                 ):
         super().__init__(
-            ExperimentalUnitListGeneratorSp(input_channels,  mid_channels_list, output_channels_list),
+            ExperimentalUnitListGeneratorSp(input_channels, mid_channels_list, output_channels_list),
             interactor = CrossConcat(),            
             calc_residual = calc_residual,
             keep_first_var_after = keep_first_var_after,

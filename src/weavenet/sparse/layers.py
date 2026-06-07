@@ -2,10 +2,60 @@
 import torch
 from torch import nn
 from typing import Optional, Callable, Tuple
-from torch_scatter import scatter_max #, scatter_min, scatter_mean
-from torch_scatter.composite import scatter_softmax
 
 from ..layers import compute_cosine_similarity
+
+
+# ---------------------------------------------------------------------------
+# Native segment ops (replace torch_scatter; see omron-sinicx/weavenet #369/#367).
+#
+# torch_scatter ships version-locked compiled binaries with no prebuilt wheel for
+# recent torch+CUDA combinations, making it an unreproducible hidden dependency.
+# `torch.scatter_reduce_` (amax) and `scatter_add_` cover the only two ops the
+# sparse path needs, so we drop the external dependency entirely. Both helpers
+# operate along dim 0 — the only axis the sparse aggregators use (vertex_id is a
+# flat per-edge segment id).
+# ---------------------------------------------------------------------------
+
+def _segment_max(src: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+    r"""Per-segment maximum along dim 0 (drop-in for ``scatter_max(...)[0]``).
+
+    Shape:
+       - src:   :math:`(E, \ldots)`
+       - index: :math:`(E,)` segment id in ``[0, num_segments)``
+       - output: :math:`(num\_segments, \ldots)`
+
+    Segments that receive no edge are filled with 0, matching ``scatter_max``'s
+    default ``fill_value`` (a non-empty segment can never stay at the ``-inf``
+    sentinel, so the fill only ever touches genuinely empty segments).
+    """
+    num = int(index.max()) + 1 if index.numel() > 0 else 0
+    idx = index.view(-1, *([1] * (src.dim() - 1))).expand_as(src)
+    out = src.new_full((num, *src.shape[1:]), float("-inf"))
+    out.scatter_reduce_(0, idx, src, reduce="amax", include_self=False)
+    return out.masked_fill(out == float("-inf"), 0.0)
+
+
+def _segment_softmax(src: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+    r"""Per-segment softmax along dim 0 (drop-in for ``scatter_softmax``).
+
+    Numerically stabilised by subtracting the per-segment max before ``exp``,
+    then normalising by the per-segment sum — the same scheme ``scatter_softmax``
+    uses internally.
+
+    Shape:
+       - src:   :math:`(E, \ldots)`
+       - index: :math:`(E,)` segment id in ``[0, num_segments)``
+       - output: :math:`(E, \ldots)`
+    """
+    num = int(index.max()) + 1 if index.numel() > 0 else 0
+    idx = index.view(-1, *([1] * (src.dim() - 1))).expand_as(src)
+    seg_max = src.new_full((num, *src.shape[1:]), float("-inf"))
+    seg_max.scatter_reduce_(0, idx, src, reduce="amax", include_self=False)
+    exp = (src - seg_max[index]).exp()
+    seg_sum = exp.new_zeros((num, *exp.shape[1:]))
+    seg_sum.scatter_add_(0, idx, exp)
+    return exp / seg_sum[index]
 
 @torch.jit.ignore
 def _resampling_relaxed_Bernoulli(logits:torch.Tensor, tau:float)->torch.Tensor:
@@ -30,12 +80,21 @@ def _gumbel_sigmoid_logits(logits:torch.Tensor,
     return ret
 
 def _kthlargest_resampling(x: torch.Tensor, dim:int, tau:float, drop_rate:float)->torch.Tensor:
-    # select k-th largest elems along to `dim` after gumbel sigmoid.
+    # Keep the top-(1-drop_rate) fraction of elements along `dim` after gumbel sigmoid.
+    # `kthvalue(K, dim)` returns the K-th smallest, so for "keep N_keep elements"
+    # we need the (N - N_keep + 1)-th smallest = (N - N_keep + 1)-th in 1-indexed
+    # so that exactly N_keep elements satisfy `>= kth_val`.
     y_soft = _gumbel_sigmoid_logits(x, tau, hard=False)
-    K = max(int(y_soft.size(dim) * (1.0-drop_rate)), 1)
-    kth_val = y_soft.kthvalue(K, dim=dim, keepdim=True)[0]
+    N = y_soft.size(dim)
+    N_keep = max(int(round(N * (1.0 - drop_rate))), 1)
+    # kthvalue is 1-indexed: K_smallest such that exactly K_smallest - 1 are strictly less.
+    # For N=100, N_keep=50 → we want kth_val to be the (100-50+1)=51st smallest, so
+    # 50 elements >= kth_val (excluding the kth_val itself if all unique).
+    # `>= kth_val` is inclusive, so this gives exactly N_keep when ties are sparse.
+    K_smallest = max(N - N_keep + 1, 1)
+    kth_val = y_soft.kthvalue(K_smallest, dim=dim, keepdim=True)[0]
     y_hard = (y_soft >= kth_val).to(x.dtype)
-    return y_hard -y_soft.detach() + y_soft
+    return y_hard - y_soft.detach() + y_soft
                  
 class MaskSelectorByLinearInferenceOr(nn.Module):
     r"""Selects edges based on linear prediction. The result for each direction is aggregated by OR rule.
@@ -58,18 +117,18 @@ class MaskSelectorByLinearInferenceOr(nn.Module):
         self.dim_src = dim_src
         self.dim_tar = dim_tar
         self.drop_rate = drop_rate
-        self.linear = None
-        
+        self.linear: Optional[nn.Linear] = None
+
     def build(self,
               input_channels:int,
               output_channels:int = 1,)->None:
         r"""Build the linear layer for the prediction. This function is automatically called in :class:`TrainableMatchingModuleSp <weavenet.sparse.weavenet.TrainableMatchingModuleSp>`.
-        
+
         Args:
             input_channels: the number of input channels.
             output_channels: the number of output channels.
-            
-        """             
+
+        """
         self.linear = nn.Linear(input_channels, output_channels, bias=True)
 
         
@@ -92,6 +151,7 @@ class MaskSelectorByLinearInferenceOr(nn.Module):
            - mask, where edges with score 1.0 are selected and 0.0 are dropped.
         """
 
+        assert self.linear is not None, "build() must be called before forward()."
         xab = self.linear.forward(xab)
         xab = _kthlargest_resampling(xab, self.dim_src, self.tau, self.drop_rate)
         xba_t = self.linear.forward(xba_t)
@@ -154,54 +214,43 @@ class MaskSelectorByNorm(nn.Module):
 
     
 class MaskSelectorBySimilarity(nn.Module):
-    r"""select mask for edge pruning with radius neighbor.
-    
+    r"""Experimental: similarity-based mask selector base class.
+
+    .. warning::
+        This class and its subclasses (:class:`MaskSelectorRadiusNeighbor`,
+        :class:`MaskSelectorReciprocalNeighbor`) are **experimental** and not
+        used by any of the live :class:`TrainableMatchingModuleSp` / :class:`WeaveNetSp`
+        paths (which default to :class:`MaskSelectorByLinearInferenceOr`).
+        :meth:`get_threshold_by_k` contains undefined-name bugs in the original
+        v1.1.0 release (``N``, ``M``, ``max_edge_survive_rate``,
+        ``max_suvive_edges_per_sample`` are not in scope) and has never been
+        executed. Until the intended semantics are clarified by the original
+        author, this class raises :class:`NotImplementedError` on use rather
+        than risking incorrect silent behaviour.
+
     Args:
-        radius: the threshold of radius neighbor. If set a value <=0, only the max_edge_survive_rate is considered. This <=0 option may accelerate the process by fixing the network shape [default: 0].
-        max_edge_survive_rate: set maximum number of edges selected in this selector by rate [default: 1.0]. e.g., a 4x4 graph has 16 edges, and at most 7 will path if the rate is 0.5.
-        max_suvive_edges_per_sample: set the maximum number of edges selected in this selector by the number of edges per sample.  If <=0, ignored. If <N (or <M), set N (or M)[default: -1]   
-        
+        max_edge_survive_rate: see original docstring above.
+        max_survive_edges_per_sample: see original docstring above.
     """
-    def __init__(self, 
+    def __init__(self,
                  max_edge_survive_rate:float=1.1,
                  max_survive_edges_per_sample:int = -1):
         super().__init__()
         self.max_edge_survive_rate = max_edge_survive_rate
         self.max_survive_edges_per_sample = max_survive_edges_per_sample
         self.set_thresh_by_kthvalue = (0<=max_edge_survive_rate and  max_edge_survive_rate<1.0) or max_survive_edges_per_sample>0
-        
-    def get_threshold_by_k(self, sim:torch.Tensor, dim:int=-1, k:int=-1)->torch.Tensor:
-        r"""calculate threshold that prevend memory overflow, based on the params.
 
-        Shape:
-            - sim: (\ldots, N, M)
-        Args:
-            sim: a similarity matrix.
-            dim: dimention of kth value.
-        Return:
-            the number of edges survive.
-        """      
-        if not self.set_thresh_by_kthvalue:
-            return torch.tensor()
-        
-        # possibly max k.
-        if k<-1: 
-            k = sim.size(dim)
-        
-        # set k by absolute number of edges per sample
-        if self.max_survive_edges_per_sample > 0:
-            k_ = max(N, M, self.max_suvive_edges_per_sample)
-            k = min(k, k_)
-            
-        # set k by rate.
-        if max_edge_survive_rate < 0.0 or max_edge_survive_rate > 1.0:            
-            k_ = int(sim.size(-1)*self.max_edge_survive_rate)
-            k = min(k, k_)
-            
-        return sim.kthvalue(k, dim=dim, keepdim=True)[0]
-    
+    def get_threshold_by_k(self, sim:torch.Tensor, dim:int=-1, k:int=-1)->torch.Tensor:
+        raise NotImplementedError(
+            "MaskSelectorBySimilarity.get_threshold_by_k is experimental and "
+            "contains undefined-name bugs in v1.1.0. Use MaskSelectorByLinearInferenceOr "
+            "or MaskSelectorByNorm instead."
+        )
+
     def wrapup(self, sim:torch.Tensor, sim_selected:torch.Tensor)->torch.Tensor:
-        if self.train:
+        # B7: `self.train` is the method (always truthy); the intended check is
+        # `self.training` (the bool flag set by .train()/.eval()).
+        if self.training:
             sim = sim - sim.detach() # make the discretized mask differential
         else:
             sim.fill_(0)
@@ -210,73 +259,40 @@ class MaskSelectorBySimilarity(nn.Module):
 
 
 class MaskSelectorRadiusNeighbor(MaskSelectorBySimilarity):
-    r"""select mask for edge pruning with radius neighbor.
-    
-    Args:
-        radius: the threshold of radius neighbor. If set a value <=0, only the max_edge_survive_rate is considered. This <=0 option may accelerate the process by fixing the network shape [default: 0].
-        max_edge_survive_rate: see :class:`MaskSelectorBySimilarity`
-        max_suvive_edges_per_sample: see :class:`MaskSelectorBySimilarity`
-        
-    """
-    def __init__(self, 
+    r"""Experimental — see :class:`MaskSelectorBySimilarity` warning."""
+    def __init__(self,
                  radius:float=0.0,
                  max_edge_survive_rate:float=1.1,
                  max_survive_edges_per_sample:int = -1):
         super().__init__(max_edge_survive_rate, max_survive_edges_per_sample)
         self.radius = radius
-        assert(radius > 0.0 or self.set_thresh_by_kthvalue) 
-                 
-    def forward(sim: torch.Tensor)->torch.Tensor:
-        r"""
+        assert(radius > 0.0 or self.set_thresh_by_kthvalue)
 
-        Shape:
-            - sim: (\ldots, N, M)
-        Args:
-            sim: a similarity matrix.
-        Return:
-            a differential mask. Elements with mask==1 is selected.
-        """
-        B, N, M = sim.shape
-        sim = sim.view(B, -1)
-        
-        thresh = self.get_threshold_by_k(sim, dim=-1) 
-        if thresh.dim()==0:
-            thresh = torch.tensor([self.radius], dtype=sim.dtype, device=sim.device)            
-        else:
-            thresh = thresh.min(self.radius)
-            
-        return self.wrapup(sim, sim<thresh).view(B, N, M)
+    # B3: original v1.1.0 forward lacked `self`. Even with `self` restored,
+    # the body depends on the broken get_threshold_by_k.
+    def forward(self, sim: torch.Tensor)->torch.Tensor:
+        raise NotImplementedError(
+            "MaskSelectorRadiusNeighbor is experimental — see base class warning."
+        )
 
 class MaskSelectorReciprocalNeighbor(MaskSelectorBySimilarity):
-    r"""Select mask for edge pruning with :math:`k`-reciprocal neighbors. Aｎ element :math:`x_a` (on side `a`) is k-reciprocal neighbor of  :math:`x_b` (on side `b`) when :math:`x_a` is in top-:math:`k` neighbors of :math:`x_b` and vice .
-    
-    Args:
-        k: use k-th nearest vertices as neighbors. If <=0, ignored [default: 0] 
-        max_edge_survive_rate: see :class:`MaskSelectorBySimilarity`
-        max_suvive_edges_per_sample: see :class:`MaskSelectorBySimilarity`
-    """
-    def __init__(self, 
+    r"""Experimental — see :class:`MaskSelectorBySimilarity` warning."""
+    def __init__(self,
                  k:int=0,
                  max_edge_survive_rate:float=0.5,
-                 max_suvive_edges_per_sample:int = -1):
+                 max_survive_edges_per_sample:int = -1):
+        # Original v1.1.0 had a typo in the local param name
+        # (`max_suvive_edges_per_sample`) that made the super() call
+        # raise NameError on construction. Fixed here for parity, but the
+        # forward path is still NotImplementedError.
         super().__init__(max_edge_survive_rate, max_survive_edges_per_sample)
         self.k = k
-        assert(k > 0 or self.set_thresh_by_kthvalue) 
-       
-    def forward(sim:torch.Tensor)->torch.Tensor:
-        r"""
+        assert(k > 0 or self.set_thresh_by_kthvalue)
 
-        Shape:
-            - sim: (\ldots, N, M)
-        Args:
-            sim: a similarity matrix.
-        Return:
-            a differential mask. Elements with mask==1 is selected.
-        """
-        thresh2_fut = torch.jit.fork(self.get_threshold_by_k, sim, dim=-1, k=self.k)
-        thresh = self.get_threshold_by_k(sim, dim=-2, k=self.k)
-        thresh = thresh.min(torch.jit.wait(thresh2_fut))        
-        return self.wrapup(sim, sim<thresh)
+    def forward(self, sim:torch.Tensor)->torch.Tensor:
+        raise NotImplementedError(
+            "MaskSelectorReciprocalNeighbor is experimental — see base class warning."
+        )
 
 class SimilarityBasedMaskInference(nn.Module):
     r"""Inferences mask based on similarity.
@@ -289,6 +305,7 @@ class SimilarityBasedMaskInference(nn.Module):
                  compute_similarity:Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = compute_cosine_similarity,
                  mask_selector:Callable[[torch.Tensor], torch.Tensor] = MaskSelectorRadiusNeighbor(0.0, 0.5),
                 ):
+        super().__init__()
         self.compute_similarity = compute_similarity
         self.mask_selector = mask_selector
         
@@ -309,11 +326,16 @@ class SparseDenseAdaptor():
     
     """
     def __init__(self, mask:torch.Tensor):
-        
+        # Mask convention: ``> 0.5`` selects an edge (matches the ST estimator
+        # output where ``y_hard - y_soft.detach() + y_soft`` produces forward
+        # values of exactly 0 or 1). Using ``> 0.5`` consistently in
+        # ``__init__`` and ``to_sparse`` avoids an index/value shape mismatch
+        # if the mask ever carries non-binary values (e.g., soft pseudo-mask
+        # without ST hardening).
         self.shape = mask.shape[:-1]
         self.N, self.M = self.shape[-2:]
         self.mask_lo = mask.view(-1, self.N, self.M)
-        self.indices = torch.nonzero(self.mask_lo).t()
+        self.indices = torch.nonzero(self.mask_lo > 0.5).t()
         self.src_vertex_id = self.indices[0]*self.N+self.indices[1]
         self.tar_vertex_id = self.indices[0]*self.M+self.indices[2]
         
@@ -383,8 +405,8 @@ class MaxPoolingAggregatorSp(nn.Module):
            x_aggregated
 
         """        
-        x_max, _ = scatter_max(x_sp, vertex_id, dim)
-        return x_max
+        assert dim == 0, "sparse MaxPoolingAggregator only aggregates along dim 0"
+        return _segment_max(x_sp, vertex_id)
 
 class SetEncoderBaseSp(nn.Module):
     r"""A sparse version of :class:`SetEncoderBase <weavenet.layers.SetEncoderBase>`
@@ -397,8 +419,8 @@ class SetEncoderBaseSp(nn.Module):
        
     """
     def __init__(self, 
-                 first_process: Callable[[torch.Tensor], torch.Tensor], 
-                 aggregator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor], 
+                 first_process: Callable[[torch.Tensor], torch.Tensor],
+                 aggregator: Callable[[torch.Tensor, torch.Tensor, int], torch.Tensor],
                  second_process_edge: Callable[[torch.Tensor], torch.Tensor],
                  second_process_vertex: Callable[[torch.Tensor], torch.Tensor],
                  #return_vertex_feature:bool=False,
@@ -431,7 +453,7 @@ class SetEncoderBaseSp(nn.Module):
         """
         z_fut = torch.jit.fork(self.second_process_edge, x)
         z = self.first_process(x)
-        z_vertex = self.aggregator(z, vertex_id, dim=0)
+        z_vertex = self.aggregator(z, vertex_id, 0)
         z_vertex = self.second_process_vertex(z_vertex)        
         
         return torch.jit.wait(z_fut) + torch.index_select(z_vertex, 0, vertex_id)
@@ -475,8 +497,8 @@ class DualSoftmaxSp(nn.Module):
                      )->Tuple[torch.Tensor, torch.Tensor]:
         if xba is None:
             xba = xab
-        zab = scatter_softmax(xab, src_id, dim=0)
-        zba = scatter_softmax(xba, tar_id, dim=0)
+        zab = _segment_softmax(xab, src_id)
+        zba = _segment_softmax(xba, tar_id)
         return zab, zba
     
     
@@ -543,11 +565,13 @@ class DualSoftmaxFuzzyLogicAndSp(DualSoftmaxSp):
     
     """
     def forward(self,
-                xab:torch.Tensor, 
-                xba:Optional[torch.Tensor]=None, 
-                is_xba_transposed:bool=True)->Tuple[torch.Tensor,torch.Tensor,torch.Tensor]:
-        r""" 
-        
+                xab:torch.Tensor,
+                src_id:torch.Tensor,
+                tar_id:torch.Tensor,
+                xba:Optional[torch.Tensor] = None,
+               )->Tuple[torch.Tensor,torch.Tensor,torch.Tensor]:
+        r"""
+
         **Shape and Args**: same as :class:`DualSoftmaxSp`
 
            
@@ -562,15 +586,4 @@ class DualSoftmaxFuzzyLogicAndSp(DualSoftmaxSp):
            
         """
         zab, zba = self.apply_softmax(xab, src_id, tar_id, xba=xba)
-        return zab.min(zba), zab, zba            
-
-if __name__ == "__main__":
-    #_ = WeaveNetOldImplementation(2, 2,1)
-    _ = WeaveNet(
-            WeaveNetStream(1,), 2, #input_channel:int,
-                 [4,8,16], #out_channels:List[int],
-                 [2,4,8], #mid_channels:List[int],1,2,2)
-                 calc_residual=[False, False, True],
-                 keep_first_var_after = 0,
-                 stream_aggregator = DualSoftMaxSqrt())
-    
+        return zab.min(zba), zab, zba
